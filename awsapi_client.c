@@ -617,6 +617,7 @@ int callback_function_invoke (const struct _u_request * httprequest, struct _u_r
 
 		ulfius_set_string_body_response(httpresponse, 200, result);
 		bp_freechunk(bp_job_bigstringpool, (void *)result);
+		return U_CALLBACK_CONTINUE;
 	}
 
 	ulfius_set_string_body_response(httpresponse, 200, "{\"status\": \"ok\"}");
