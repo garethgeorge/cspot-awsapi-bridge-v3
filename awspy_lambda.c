@@ -11,7 +11,8 @@
 #include "woofc.h"
 #include "3rdparty/json.h"
 
-#define ELEMENT_SIZE 8 * 1024
+#include "constants.h"
+
 #define NAMESPACE 
 
 #define DEBUG
@@ -337,13 +338,13 @@ int awspy_lambda(WOOF *wf, unsigned long seq_no, void *ptr) {
 	Py_DECREF(py_packaged_result_unicode);
 
 	if (arguments.result_woof) {
-		if (strlen(result_str) > ELEMENT_SIZE) {
-			fdebugf(stderr, "Fatal error: result object can not fit in ELEMENT_SIZE (%d bytes)\n", ELEMENT_SIZE);
+		if (strlen(result_str) > RESULT_WOOF_EL_SIZE) {
+			fdebugf(stderr, "Fatal error: result object can not fit in ELEMENT_SIZE (%d bytes)\n", RESULT_WOOF_EL_SIZE);
 			return -1;
 		}
 
-		char result_element_buffer[ELEMENT_SIZE];
-		memset(result_element_buffer, 0, ELEMENT_SIZE);
+		char result_element_buffer[RESULT_WOOF_EL_SIZE];
+		memset(result_element_buffer, 0, RESULT_WOOF_EL_SIZE);
 		strcpy(result_element_buffer, result_str);
 
 		int idx = WooFPut((char *)arguments.result_woof, NULL, result_element_buffer);

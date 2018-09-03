@@ -27,6 +27,7 @@
 #define PORT 80
 #define WORKER_QUEUE_DEPTH 32
 #define RESULT_WOOF_COUNT 8
+#define INVOKE_TIMEOUT 10000L
 
 
 /*
@@ -97,7 +98,7 @@ static int wpcmd_waitforresult(WP *wp, WPJob *job) {
 		timeout -= sleep_time;
 	}
 
-	if (timeout < 0 || seqno < 0)
+	if (timeout < 0 || seqno == startseqno)
 		return -1;
 
 	WooFGet(arg->resultwoof.woofname, resultbuffer, seqno);
@@ -229,7 +230,7 @@ struct CSPOTNamespace *namespace_for_function(const char *funcname) {
 				exit(0);
 			}
 			fprintf(stdout, "WooFCNamespacePlatform running\n");
-			execl("./woofc-namespace-platform", "./woofc-namespace-platform", "-m", "4", "-M", "8", NULL);
+			execl("./woofc-namespace-platform", "./woofc-namespace-platform", "-m", "4", "-M", "4", NULL);
 			exit(0);
 		}
 		
