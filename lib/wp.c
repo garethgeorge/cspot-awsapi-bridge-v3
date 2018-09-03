@@ -57,6 +57,7 @@ int init_wp(WP *wp, int queue_depth, WPHandler *handlers, int work_threads) {
 		args->wp = wp;
 		args->threadid = work_threads;
 		wp_command_loop(args);
+		exit(0);
 	}
 	return 0;
 }
