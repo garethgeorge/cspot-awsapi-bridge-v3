@@ -7,6 +7,8 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <mutex>
+#include <unordered_map>
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,10 +22,7 @@ extern "C" {
 
 
 #include <src/constants.h>
-
 #include <3rdparty/base64.h>
-#include <3rdparty/hashtable.h>
-
 #include <lib/utility.h>
 #include <lib/wp.h>
 
@@ -39,33 +38,32 @@ SharedBufferPool *bp_jobobject_pool;
 SharedBufferPool *bp_job_bigstringpool;
 
 struct CSPOTNamespace {
-	WP *worker_process;
+	WP *worker_process = NULL;
+	int woofcnamespace_pid = -1;
+
 	// a queue containing result WooFs for reuse
-	Queue result_woof_queue; 
+	Queue result_woof_queue;
+
+	CSPOTNamespace() {
+		queue_init(&(this->result_woof_queue), sizeof(struct ResultWooF), RESULT_WOOF_COUNT);
+	}
+
+	~CSPOTNamespace() {
+		queue_free(&(this->result_woof_queue));
+		if (worker_process != NULL)
+			free_wp(worker_process);
+		if (woofcnamespace_pid != -1)
+			kill(this->woofcnamespace_pid, SIGTERM);
+	}
 };
 
-typedef struct CSPOTNamespace CSPOTNamespace;
-
-CSPOTNamespace *cspotnamespace_create() {
-	CSPOTNamespace *ns = (CSPOTNamespace *)malloc(sizeof(CSPOTNamespace));
-	queue_init(&(ns->result_woof_queue), sizeof(struct ResultWooF), RESULT_WOOF_COUNT);
-	return ns;
-}
-
-void cspotnamespace_free(CSPOTNamespace *ns) {
-	sharedqueue_free(&(ns->result_woof_queue));
-	free(ns);
-}
-
-
-pthread_mutex_t namespaces_lock;
-struct hash_table *namespaces;
+std::mutex namespaces_mtx;
+std::unordered_map<std::string, CSPOTNamespace*> namespaces;
 
 void worker_process_manager_init() {
 	fprintf(stdout, "worker process manager initializing\n");
 
-	pthread_mutex_init(&namespaces_lock, 0);
-	namespaces = hash_table_create(hash_string, hash_equals_string);
+	std::lock_guard<std::mutex> lock(namespaces_mtx);
 
 	fprintf(stdout, "shared memory object pools initializing\n");
 	bp_jobobject_pool = sharedbuffpool_create(sizeof(union wpcmd_job_data_types), WORKER_QUEUE_DEPTH);
@@ -86,36 +84,34 @@ void worker_process_manager_init() {
 
 void worker_process_manager_shutdown() {
 	fprintf(stdout, "worker process manager shutting down\n");
-	pthread_mutex_lock(&namespaces_lock);
-	struct hash_entry *entry;
-	hash_table_foreach(namespaces, entry) {
-		CSPOTNamespace *ns = (CSPOTNamespace *)(entry->data);
-		cspotnamespace_free(ns);
+	std::lock_guard<std::mutex> lock(namespaces_mtx);
+	
+	auto it = namespaces.begin();
+
+	while (it != namespaces.end()) {
+		fprintf(stdout, "\tfree namespace for function: %s\n", it->first.c_str());
+		delete it->second;
+		it = namespaces.erase(it);
 	}
-	pthread_mutex_unlock(&namespaces_lock);
+
+	fprintf(stdout, "free'd all namespaces\n");
+
 	sharedbuffpool_free(bp_jobobject_pool);
 	sharedbuffpool_free(bp_job_bigstringpool);
-
-	// TODO: we just let the hashtable leak since the process will soon end in any case
-	// remember: you must free both the keys and the values since we strdup the funcname 
-	// when you get around to properly deallocating the hashtable
 }
 
 struct CSPOTNamespace *namespace_for_function(const char *funcname) {
-	pthread_mutex_lock(&namespaces_lock);
-	struct hash_entry *result = hash_table_search(namespaces, funcname);
+	std::lock_guard<std::mutex> lock(namespaces_mtx);
 	
-	if (result != NULL) {
-		pthread_mutex_unlock(&namespaces_lock);
+	if (namespaces.find(funcname) != namespaces.end()) {
 		fprintf(stdout, "Found an existing worker process for the function specified\n");
-		return (CSPOTNamespace *)result->data;
+		return namespaces[funcname];
 	} else {
 		fprintf(stdout, "No existing worker process for the function specified, creating worker process\n");
 
-		WP *wp = (WP *)malloc(sizeof(struct WP));
+		WP *wp = new WP;
 		if (init_wp(wp, WORKER_QUEUE_DEPTH, wphandler_array, 4) < 0) {
 			fprintf(stderr, "Fatal error: failed to construct the worker process\n");
-			pthread_mutex_unlock(&namespaces_lock);
 			return NULL;
 		}
 
@@ -123,8 +119,11 @@ struct CSPOTNamespace *namespace_for_function(const char *funcname) {
 		sprintf(funcdir, "./functions/%s/", funcname);
 
 		// fork the namespace platform
-		int pid = fork(); // TOOD: keep track of this pid and eventually garbage collect them
-		if (pid == 0) {
+		int nspid = fork(); // TOOD: keep track of this pid and eventually garbage collect them
+		if (nspid < 0) {
+			fprintf(stderr, "Fatal error: failed to fork woofc-namespace-platform executable\n");
+			return NULL;
+		} else if (nspid == 0) {
 			fprintf(stdout, "Subprocess: created the woofc-namespace-platform child process\n");
 
 			if (chdir(funcdir) != 0) {
@@ -134,6 +133,8 @@ struct CSPOTNamespace *namespace_for_function(const char *funcname) {
 			fprintf(stdout, "WooFCNamespacePlatform running\n");
 			execl("./woofc-namespace-platform", "./woofc-namespace-platform", "-m", "4", "-M", "8", NULL);
 			exit(0);
+		} else {
+			fprintf(stdout, "WoofCNamespacePlatform PID: %d\n", nspid);
 		}
 		
 		{
@@ -144,7 +145,6 @@ struct CSPOTNamespace *namespace_for_function(const char *funcname) {
 			theJob->arg = arg;
 			if (wp_job_invoke(wp, theJob) < 0) {
 				fprintf(stderr, "Fatal error: worker process failed to change directory to function dir\n");
-				pthread_mutex_unlock(&namespaces_lock);
 				bp_freechunk(bp_jobobject_pool, (void *)arg);
 				free_wp(wp);
 				return NULL;
@@ -153,9 +153,11 @@ struct CSPOTNamespace *namespace_for_function(const char *funcname) {
 			fprintf(stdout, "worker process changed directory to function dir '%s'\n", funcdir);
 		}
 
-		CSPOTNamespace *ns = cspotnamespace_create();
+		CSPOTNamespace *ns = new CSPOTNamespace;
 		ns->worker_process = wp;
-
+		ns->woofcnamespace_pid = nspid;
+		
+		// create the result woofs for the process
 		{
 			int i;
 			for (i = 0; i < RESULT_WOOF_COUNT; ++i) {
@@ -181,13 +183,11 @@ struct CSPOTNamespace *namespace_for_function(const char *funcname) {
 					bp_freechunk(bp_jobobject_pool, (void *)arg);
 					if (retval < 0) {
 						fprintf(stderr, "Fatal error: failed to create result woof '%s'\n", woofname);
-						pthread_mutex_unlock(&namespaces_lock);
-						cspotnamespace_free(ns);
-						free_wp(wp);
+						delete ns;
 						return NULL;
 					}
 				}
-
+				
 				WPJob* theJob = create_job_easy(wp, wpcmd_woofgetlatestseqno);
 				struct wpcmd_woofgetlatestseqno_arg *arg = 
 					(struct wpcmd_woofgetlatestseqno_arg *)(theJob->arg = bp_getchunk(bp_jobobject_pool));
@@ -196,9 +196,7 @@ struct CSPOTNamespace *namespace_for_function(const char *funcname) {
 				bp_freechunk(bp_jobobject_pool, (void *)arg);
 				if (retval < 0) {
 					fprintf(stderr, "Fatal error: failed to get seqno for result woof '%s' retval: %d\n", woofname, retval);
-					pthread_mutex_unlock(&namespaces_lock);
-					cspotnamespace_free(ns);
-					free_wp(wp);
+					delete ns;
 					return NULL;
 				}
 
@@ -210,14 +208,14 @@ struct CSPOTNamespace *namespace_for_function(const char *funcname) {
 			}
 		}
 
-		hash_table_insert(namespaces, strdup(funcname), (void *)ns);
-		pthread_mutex_unlock(&namespaces_lock);
+		namespaces[funcname] = ns;
 
 		return ns;
 	}
 }
 
 int strIsValidFuncName(const char *str) {
+	// TODO: replace this with a C++11 regex match
 	while (*str != '\0') {
 		if (!((*str >= '0' && *str <= '9') || (*str >= 'a' && *str <= 'z') || (*str >= 'A' && *str <= 'Z') || *str == '-' || *str == '_')) return 0 ;
 		str++;
@@ -250,7 +248,6 @@ int copy_file(const char *dstfilename, const char *srcfilename, int perms) {
 /*
 	API request handler for callback_function_create 
 */
-
 int callback_function_create (const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
 	fprintf(stdout, "\n\nPOST REQUEST: callback_function_create\n");
 	json_t* req_json = json_loadb((const char *)httprequest->binary_body, httprequest->binary_body_length, 0, NULL);
@@ -387,7 +384,7 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 
 		fprintf(stdout, "Created the WooF '%s' return code: %d\n", CALL_WOOF_NAME, retval);
 	}
-
+	
 	// finally, write out the metadata file
 	char metadata_file_path[PATH_MAX];
 	sprintf(metadata_file_path, "./functions/%s/%s-metadata.json", funcname, funcname);
@@ -421,8 +418,9 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 */
 int callback_function_invoke (const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
 	fprintf(stdout, "\n\nPOST REQUEST: callback_function_invoke\n");
-
+	
 	json_t* req_json = json_loadb((char *)httprequest->binary_body, httprequest->binary_body_length, 0, NULL);
+
 	json_dumpfd(req_json, 1, JSON_INDENT(2));
 	fprintf(stdout, "\n");
 	if (!req_json) {
@@ -455,7 +453,7 @@ int callback_function_invoke (const struct _u_request * httprequest, struct _u_r
 	fclose(metadata_file);
 
 	// generate resultwoof if needed
-	const char *invocation_type = u_map_get(httprequest->map_header, "X-Amz-Client-Context") ;
+	const char *invocation_type = u_map_get(httprequest->map_header, "X-Amz-Invocation-Type") ;
 	if (!invocation_type) 
 		invocation_type = "RequestResponse";
 	
@@ -637,6 +635,18 @@ int callback_function_invoke (const struct _u_request * httprequest, struct _u_r
 	return U_CALLBACK_CONTINUE;
 }
 
+void sig_handler(int sig) {
+	switch (sig) {
+	case SIGINT:
+		fprintf(stderr, "\n\nCAUGHT SIGNAL: shutting down\n");
+		worker_process_manager_shutdown();
+		abort();
+	default:
+		fprintf(stderr, "Unhandled termination signal encountered\n");
+		abort();
+	}
+}
+
 int main(int argc, char **argv)
 {
 	/*
@@ -664,9 +674,10 @@ int main(int argc, char **argv)
 	ulfius_add_endpoint_by_val(&instance, "POST", "/2015-03-31/", "/functions/:name/invocations", 0, &callback_function_invoke, NULL);
 
 	// Start the framework
+	signal(SIGINT, sig_handler);
+
 	if (ulfius_start_framework(&instance) == U_OK) {
 		printf("Start framework on port %d\n", instance.port);
-
 		fgetc(stdin); // block until input from user
 	} else {
 		fprintf(stderr, "Error starting framework\n");

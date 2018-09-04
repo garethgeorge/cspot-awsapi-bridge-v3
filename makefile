@@ -1,6 +1,6 @@
 # default options
 CC=gcc
-CPPCC=g++
+CPPCC=g++ -std=c++11
 DEP=../
 WOOFC=../cspot/
 UINC=${DEP}/euca-cutils
@@ -29,6 +29,7 @@ PYLIBS=$(shell ${PYVERSION}-config --ldflags) # python flags for linking
 CFLAGS=-pthread -lrt -g -I${UINC} -I${MINC} -I${SINC} -I.
 
 HAND1=awspy_lambda
+# HAND2=awsjs_lambda
 
 all: awsapi_client ${HAND1} utiltest
 
@@ -42,6 +43,13 @@ ${HAND1}: ${HAND1}.cpp ${SHEP_SRC} ${WINC} ${LINC} ${LOBJ} ${WOBJ} ${SLIB} ${SIN
 	${CC} ${CFLAGS} ${PYCFLAGS} -c ${HAND1}_shepherd.c -o ${HAND1}_shepherd.o
 	${CPPCC} ${CFLAGS} ${PYCFLAGS} -o ${HAND1} ${HAND1}.cpp ${HAND1}_shepherd.o ${CSPOT_COMMON_LIBS} ${MY_LIBS} ${PYLIBS} 
 	mkdir -p cspot; cp ${HAND1} ./cspot; cp ${WOOFC}/woofc-container ./cspot; cp ${WOOFC}/woofc-namespace-platform ./cspot
+
+# ${HAND2}: ${HAND1}.cpp ${SHEP_SRC} ${WINC} ${LINC} ${LOBJ} ${WOBJ} ${SLIB} ${SINC} ${MY_LIBS}
+# 	sed 's/WOOF_HANDLER_NAME/${HAND2}/g' ${SHEP_SRC} > ${HAND2}_shepherd.c
+# 	${CC} ${CFLAGS} ${PYCFLAGS} -c ${HAND2}_shepherd.c -o ${HAND2}_shepherd.o
+# 	${CPPCC} ${CFLAGS} ${PYCFLAGS} -o ${HAND2} ${HAND2}.cpp ${HAND2}_shepherd.o ${CSPOT_COMMON_LIBS} ${MY_LIBS} ${PYLIBS} 
+# 	mkdir -p cspot; cp ${HAND2} ./cspot; cp ${WOOFC}/woofc-container ./cspot; cp ${WOOFC}/woofc-namespace-platform ./cspot
+
 
 # helper libraries
 utiltest: utiltest.c lib/utility.o lib/wp.o

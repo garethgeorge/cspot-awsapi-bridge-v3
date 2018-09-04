@@ -2,7 +2,7 @@
 
 Run the provided script ``initialize.sh`` to install all required dependencies.
 
-
+You will need to install v8 manually in the 3rdparty folder to enable javascript lambdas. See: http://commondatastorage.googleapis.com/chrome-infra-docs/flat/depot_tools/docs/html/depot_tools_tutorial.html#_setting_up 
 
 # notes
 
