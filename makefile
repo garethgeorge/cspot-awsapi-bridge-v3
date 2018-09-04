@@ -34,13 +34,13 @@ all: awsapi_client ${HAND1} utiltest
 
 awsapi_client: ${WINC} src/client/awsapi_client.cpp src/client/wpcmds.c ${MY_LIBS}
 	${CC} ${CFLAGS} -Wall -c src/client/wpcmds.c -o src/client/wpcmds.o
-	g++ ${CFLAGS} -Wall -o awsapi_client src/client/awsapi_client.cpp ${CSPOT_COMMON_LIBS} ${MY_LIBS} src/client/wpcmds.o -lulfius -ljansson
+	${CPPCC} ${CFLAGS} -Wall -o awsapi_client src/client/awsapi_client.cpp ${CSPOT_COMMON_LIBS} ${MY_LIBS} src/client/wpcmds.o -lulfius -ljansson
 	mkdir -p cspot; cp awsapi_client ./cspot 
 
-${HAND1}: ${HAND1}.c ${SHEP_SRC} ${WINC} ${LINC} ${LOBJ} ${WOBJ} ${SLIB} ${SINC} ${MY_LIBS}
+${HAND1}: ${HAND1}.cpp ${SHEP_SRC} ${WINC} ${LINC} ${LOBJ} ${WOBJ} ${SLIB} ${SINC} ${MY_LIBS}
 	sed 's/WOOF_HANDLER_NAME/${HAND1}/g' ${SHEP_SRC} > ${HAND1}_shepherd.c
 	${CC} ${CFLAGS} ${PYCFLAGS} -c ${HAND1}_shepherd.c -o ${HAND1}_shepherd.o
-	${CC} ${CFLAGS} ${PYCFLAGS} -o ${HAND1} ${HAND1}.c ${HAND1}_shepherd.o ${CSPOT_COMMON_LIBS} ${MY_LIBS} ${PYLIBS} 
+	${CPPCC} ${CFLAGS} ${PYCFLAGS} -o ${HAND1} ${HAND1}.cpp ${HAND1}_shepherd.o ${CSPOT_COMMON_LIBS} ${MY_LIBS} ${PYLIBS} 
 	mkdir -p cspot; cp ${HAND1} ./cspot; cp ${WOOFC}/woofc-container ./cspot; cp ${WOOFC}/woofc-namespace-platform ./cspot
 
 # helper libraries

@@ -19,13 +19,18 @@ extern "C" {
 #endif
 
 
-#include <constants.h>
+#include <src/constants.h>
 
 #include <3rdparty/base64.h>
 #include <3rdparty/hashtable.h>
 
 #include <lib/utility.h>
 #include <lib/wp.h>
+
+extern "C" {
+	#define LOG_H // prevent this header from loading
+	#include <woofc.h>
+}
 
 #include "wpcmds.h"
 

@@ -8,10 +8,13 @@
 #include <string.h>
 #include <Python.h>
 
-#include "woofc.h"
-#include "3rdparty/json.h"
+extern "C" {
+	#define LOG_H // prevent this header from loading
+	#include <woofc.h>
+}
 
-#include "constants.h"
+#include <3rdparty/json.h>
+#include <src/constants.h>
 
 #define NAMESPACE 
 
@@ -22,6 +25,11 @@
 #else
 #define fdebugf(args...) 
 #endif
+
+extern "C" {
+	// C function that we expose
+	int awspy_lambda(WOOF *wf, unsigned long seqno, void *ptr);
+}
 
 struct InvocationArguments {
 	const char *function_name;
@@ -73,7 +81,7 @@ json_value *read_json_file(const char *fname) {
 	fseek(f, 0, SEEK_SET);
 
 	// read & null terminate the file
-	file_content = malloc(file_length);
+	file_content = (char *)malloc(file_length);
 	fread(file_content, 1, file_length, f);
 
 	// parse the json data
@@ -94,9 +102,10 @@ struct FunctionMetadata* load_function_metadata(const char *ns, const char *func
 		return NULL;
 	}
 
-	struct FunctionMetadata *metadata = malloc(sizeof(struct FunctionMetadata));
+	struct FunctionMetadata *metadata =
+		(struct FunctionMetadata *)malloc(sizeof(struct FunctionMetadata));
 	
-	metadata->function_directory = malloc(PATH_MAX);
+	metadata->function_directory = (char *)malloc(PATH_MAX);
 	sprintf((char *)metadata->function_directory, "%s/", ns);
 	metadata->function_name = strdup(json_get_str_for_key(func_metadata, "FunctionName"));
 	metadata->handler_name = json_get_str_for_key(func_metadata, "Handler");
@@ -168,12 +177,11 @@ PyObject* get_python_method(PyObject *module, const char *method_name) {
 	return method;
 }
 
-
 int awspy_lambda(WOOF *wf, unsigned long seq_no, void *ptr) {
 	struct InvocationArguments arguments;
 	struct FunctionMetadata *function_metadata;
 	
-	char *input_data_buffer = ptr;
+	char *input_data_buffer = (char *)ptr;
 
 	// STEP 1) determine the location of the namespace we are running from 
 	//         and change the working directory
