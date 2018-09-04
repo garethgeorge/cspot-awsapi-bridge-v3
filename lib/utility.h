@@ -3,6 +3,10 @@
 
 #include <semaphore.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct Queue {
 	int head;
 	int tail;
@@ -45,5 +49,9 @@ extern void sharedbuffpool_free(SharedBufferPool *bp);
 extern void *bp_getchunk(SharedBufferPool *bp);
 
 extern int bp_freechunk(SharedBufferPool *bp, void *chunk);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

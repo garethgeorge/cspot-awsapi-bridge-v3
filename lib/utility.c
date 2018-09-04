@@ -28,9 +28,9 @@ int queue_init(Queue *queue, int elem_size, int size) {
 	queue->elem_size = elem_size;
 	queue->size_bytes = size * elem_size;
 
-	sem_init(&(queue->space), 1, size);
-	sem_init(&(queue->items), 1, 0);
-	sem_init(&(queue->mutex), 1, 1);
+	sem_init(&(queue->space), 0, size);
+	sem_init(&(queue->items), 0, 0);
+	sem_init(&(queue->mutex), 0, 1);
 
 	queue->elements = malloc(elem_size * size);
 	if (queue->elements == NULL)

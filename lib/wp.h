@@ -3,6 +3,10 @@
 
 #include "utility.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct WP;
 struct WPJob;
 typedef struct WPJob WPJob;
@@ -39,5 +43,9 @@ extern WPJob* create_job_easy(WP* wp, WPHandler func);
 extern int wp_job_invoke(WP *wp, WPJob *job);
 // should never need to be called directly
 extern int wp_job_free(WP *wp, WPJob *job);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

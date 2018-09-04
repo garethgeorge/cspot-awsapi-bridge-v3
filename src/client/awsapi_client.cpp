@@ -8,129 +8,26 @@
 #include <sys/stat.h>
 #include <pthread.h>
 
+#ifdef __cplusplus
+extern "C" {
+	#include <ulfius.h> // rest API library
+	#include <jansson.h> // json library
+}
+#else 
 #include <ulfius.h> // rest API library
 #include <jansson.h> // json library
-
-#include "woofc.h"
-#include "woofc-host.h"
-
-#include "constants.h"
-
-#include "3rdparty/base64.h"
-#include "3rdparty/hashtable.h"
-
-#include "lib/utility.h"
-#include "lib/wp.h"
-
-// https://jansson.readthedocs.io/en/latest/
-
-#define PORT 80
-#define WORKER_QUEUE_DEPTH 32
-#define RESULT_WOOF_COUNT 8
-#define INVOKE_TIMEOUT 10000L
+#endif
 
 
-/*
-	Worker process commands etc
-*/
-struct ResultWooF {
-	char woofname[256];
-	int seqno;
-};
+#include <constants.h>
 
-struct wpcmd_initdir_arg {
-	char dir[PATH_MAX];
-};
+#include <3rdparty/base64.h>
+#include <3rdparty/hashtable.h>
 
-static int wpcmd_initdir(WP *wp, WPJob* job) {
-	struct wpcmd_initdir_arg *arg = job->arg;
-	fprintf(stdout, "Child process: chdir('%s')\n", arg->dir);
-	if (chdir(arg->dir) != 0)
-		return -1;
-	return WooFInit();
-}
+#include <lib/utility.h>
+#include <lib/wp.h>
 
-struct wpcmd_woofcreate_arg {
-	int el_size;
-	int queue_depth;
-	char woofname[PATH_MAX];
-};
-
-static int wpcmd_woofcreate(WP *wp, WPJob* job) {
-	struct wpcmd_woofcreate_arg *arg = job->arg;
-	fprintf(stdout, "Child process: WooFCreate('%s', %d, %d)\n", arg->woofname, arg->el_size, arg->queue_depth);
-	int retval = WooFCreate(arg->woofname, arg->el_size, arg->queue_depth);
-	fprintf(stdout, "Child process: \t woofcreate returned: %d\n", retval);
-	return retval;
-}
-
-struct wpcmd_woofput_arg {
-	char woofname[PATH_MAX];
-	char handlername[256];
-	char *payload; // remember, it must be placed in shared memory!
-};
-
-static int wpcmd_woofput(WP *wp, WPJob* job) {
-	struct wpcmd_woofput_arg *arg = job->arg;
-	fprintf(stdout, "Child process: WooFPut('%s', '%s', %lx)\n", arg->woofname, arg->handlername, (unsigned long) arg->payload);
-	return WooFPut(arg->woofname, arg->handlername, arg->payload);
-}
-
-struct wpcmd_waitforresult_arg {
-	struct ResultWooF resultwoof;
-	long timeout;
-}; // no result struct, the result is just a buffer
-
-static int wpcmd_waitforresult(WP *wp, WPJob *job) {
-	struct wpcmd_waitforresult_arg *arg = job->arg;
-	char *resultbuffer = job->result;
-	fprintf(stdout, "Child process: WaitForResult(%s)\n", arg->resultwoof.woofname);
-	
-	int seqno = 0;
-	int startseqno = arg->resultwoof.seqno;
-	long timeout = arg->timeout; // 30 seconds
-	long sleep_time = 4L;
-
-	while (timeout > 0 && (seqno = WooFGetLatestSeqno(arg->resultwoof.woofname)) == startseqno ) {
-		if (nanosleep((const struct timespec[]){{0, sleep_time * 1000000L}}, NULL) != 0) {
-			break ;
-		}
-		timeout -= sleep_time;
-	}
-
-	if (timeout < 0 || seqno == startseqno)
-		return -1;
-
-	WooFGet(arg->resultwoof.woofname, resultbuffer, seqno);
-	return seqno;
-}
-
-struct wpcmd_woofgetlatestseqno_arg {
-	char woofname[PATH_MAX];
-};
-
-static int wpcmd_woofgetlatestseqno(WP *wp, WPJob *job) {
-	struct wpcmd_woofgetlatestseqno_arg *arg = job->arg;
-	return WooFGetLatestSeqno(arg->woofname);
-}
-
-
-union wpcmd_job_data_types {
-	struct wpcmd_initdir_arg wpcmd_initdir_arg;
-	struct wpcmd_woofcreate_arg wpcmd_woofcreate_arg;
-	struct wpcmd_woofput_arg wpcmd_woofput_arg;
-	struct wpcmd_waitforresult_arg wpcmd_waitforresult_arg;
-	struct wpcmd_woofgetlatestseqno_arg wpcmd_woofgetlatestseqno_arg;
-};
-
-static WPHandler wphandler_array[] = {
-	wpcmd_initdir,
-	wpcmd_woofcreate,
-	wpcmd_woofput, 
-	wpcmd_waitforresult,
-	wpcmd_woofgetlatestseqno,
-	NULL
-};
+#include "wpcmds.h"
 
 // Finally some book keeping related to our worker processes
 SharedBufferPool *bp_jobobject_pool;
@@ -145,14 +42,14 @@ struct CSPOTNamespace {
 typedef struct CSPOTNamespace CSPOTNamespace;
 
 CSPOTNamespace *cspotnamespace_create() {
-	CSPOTNamespace *namespace = malloc(sizeof(CSPOTNamespace));
-	queue_init(&(namespace->result_woof_queue), sizeof(struct ResultWooF), RESULT_WOOF_COUNT);
-	return namespace;
+	CSPOTNamespace *ns = (CSPOTNamespace *)malloc(sizeof(CSPOTNamespace));
+	queue_init(&(ns->result_woof_queue), sizeof(struct ResultWooF), RESULT_WOOF_COUNT);
+	return ns;
 }
 
-void cspotnamespace_free(CSPOTNamespace *namespace) {
-	sharedqueue_free(&(namespace->result_woof_queue));
-	free(namespace);
+void cspotnamespace_free(CSPOTNamespace *ns) {
+	sharedqueue_free(&(ns->result_woof_queue));
+	free(ns);
 }
 
 
@@ -210,7 +107,7 @@ struct CSPOTNamespace *namespace_for_function(const char *funcname) {
 	} else {
 		fprintf(stdout, "No existing worker process for the function specified, creating worker process\n");
 
-		WP *wp = malloc(sizeof(struct WP));
+		WP *wp = (WP *)malloc(sizeof(struct WP));
 		if (init_wp(wp, WORKER_QUEUE_DEPTH, wphandler_array, 4) < 0) {
 			fprintf(stderr, "Fatal error: failed to construct the worker process\n");
 			pthread_mutex_unlock(&namespaces_lock);
@@ -230,14 +127,14 @@ struct CSPOTNamespace *namespace_for_function(const char *funcname) {
 				exit(0);
 			}
 			fprintf(stdout, "WooFCNamespacePlatform running\n");
-			execl("./woofc-namespace-platform", "./woofc-namespace-platform", "-m", "4", "-M", "4", NULL);
+			execl("./woofc-namespace-platform", "./woofc-namespace-platform", "-m", "4", "-M", "8", NULL);
 			exit(0);
 		}
 		
 		{
 			sleep(1); // TODO: find a better way of avoiding the race than this...
 			WPJob* theJob = create_job_easy(wp, wpcmd_initdir);
-			struct wpcmd_initdir_arg *arg = bp_getchunk(bp_jobobject_pool);
+			struct wpcmd_initdir_arg *arg = (struct wpcmd_initdir_arg *)bp_getchunk(bp_jobobject_pool);
 			strcpy(arg->dir, funcdir);
 			theJob->arg = arg;
 			if (wp_job_invoke(wp, theJob) < 0) {
@@ -269,7 +166,8 @@ struct CSPOTNamespace *namespace_for_function(const char *funcname) {
 					fprintf(stderr, "Result WooF '%s' does not exist, making it\n", woofpath);
 
 					WPJob* theJob = create_job_easy(wp, wpcmd_woofcreate);
-					struct wpcmd_woofcreate_arg *arg = theJob->arg = bp_getchunk(bp_jobobject_pool);
+					struct wpcmd_woofcreate_arg *arg =
+						(struct wpcmd_woofcreate_arg *)(theJob->arg = bp_getchunk(bp_jobobject_pool));
 					arg->el_size = RESULT_WOOF_EL_SIZE;
 					arg->queue_depth = 1; // result woof only needs to hold one result at a time
 					strcpy(arg->woofname, woofname);
@@ -286,7 +184,8 @@ struct CSPOTNamespace *namespace_for_function(const char *funcname) {
 				}
 
 				WPJob* theJob = create_job_easy(wp, wpcmd_woofgetlatestseqno);
-				struct wpcmd_woofgetlatestseqno_arg *arg = theJob->arg = bp_getchunk(bp_jobobject_pool);
+				struct wpcmd_woofgetlatestseqno_arg *arg = 
+					(struct wpcmd_woofgetlatestseqno_arg *)(theJob->arg = bp_getchunk(bp_jobobject_pool));
 				strcpy(arg->woofname, woofname);
 				int retval = wp_job_invoke(wp, theJob);
 				bp_freechunk(bp_jobobject_pool, (void *)arg);
@@ -349,7 +248,7 @@ int copy_file(const char *dstfilename, const char *srcfilename, int perms) {
 
 int callback_function_create (const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
 	fprintf(stdout, "\n\nPOST REQUEST: callback_function_create\n");
-	json_t* req_json = json_loadb(httprequest->binary_body, httprequest->binary_body_length, 0, NULL);
+	json_t* req_json = json_loadb((const char *)httprequest->binary_body, httprequest->binary_body_length, 0, NULL);
 	json_dumpfd(req_json, 1, JSON_INDENT(4));
 	fprintf(stdout, "\n");
 
@@ -395,7 +294,7 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 		}
 
 		int decoded_func_zip_len = Base64decode_len(b64_encoded_func_zip);
-		char *decoded_func_zip = malloc(decoded_func_zip_len);
+		char *decoded_func_zip = (char *)malloc(decoded_func_zip_len);
 		if (!decoded_func_zip) {
 			fprintf(stderr, "Fatal error: failed to malloc memory for decoding zipfile\n");
 			json_decref(req_json);
@@ -464,7 +363,8 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 	// dispatch a command to the subprocess to create the WooF
 	{
 		WPJob* theJob = create_job_easy(wp, wpcmd_woofcreate);
-		struct wpcmd_woofcreate_arg *arg = theJob->arg = bp_getchunk(bp_jobobject_pool);
+		struct wpcmd_woofcreate_arg *arg = 
+			(struct wpcmd_woofcreate_arg *)(theJob->arg = bp_getchunk(bp_jobobject_pool));
 		arg->el_size = CALL_WOOF_EL_SIZE;
 		arg->queue_depth = CALL_WOOF_QUEUE_DEPTH;
 		strcpy(arg->woofname, CALL_WOOF_NAME);
@@ -517,7 +417,7 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 int callback_function_invoke (const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
 	fprintf(stdout, "\n\nPOST REQUEST: callback_function_invoke\n");
 
-	json_t* req_json = json_loadb(httprequest->binary_body, httprequest->binary_body_length, 0, NULL);
+	json_t* req_json = json_loadb((char *)httprequest->binary_body, httprequest->binary_body_length, 0, NULL);
 	json_dumpfd(req_json, 1, JSON_INDENT(2));
 	fprintf(stdout, "\n");
 	if (!req_json) {
@@ -578,7 +478,8 @@ int callback_function_invoke (const struct _u_request * httprequest, struct _u_r
 		queue_get(&(ns->result_woof_queue), &resultwoof);
 
 		WPJob* theJob = create_job_easy(wp, wpcmd_woofgetlatestseqno);
-		struct wpcmd_woofgetlatestseqno_arg *arg = theJob->arg = bp_getchunk(bp_jobobject_pool);
+		struct wpcmd_woofgetlatestseqno_arg *arg = 
+			(struct wpcmd_woofgetlatestseqno_arg *)(theJob->arg = bp_getchunk(bp_jobobject_pool));
 		strcpy(arg->woofname, resultwoof.woofname);
 		int retval = wp_job_invoke(wp, theJob);
 		bp_freechunk(bp_jobobject_pool, (void *)arg);
@@ -646,7 +547,7 @@ int callback_function_invoke (const struct _u_request * httprequest, struct _u_r
 			return U_CALLBACK_CONTINUE;
 		}
 
-		woofputbuffer = malloc(CALL_WOOF_EL_SIZE); 
+		woofputbuffer = (char *)malloc(CALL_WOOF_EL_SIZE); 
 		if (woofputbuffer == NULL) {
 			free((void *)payload_str);
 			free((void *)metadata_str);
@@ -670,10 +571,11 @@ int callback_function_invoke (const struct _u_request * httprequest, struct _u_r
 	// Do the WooF Put that invokes the lambda function
 	{
 		WPJob* theJob = create_job_easy(wp, wpcmd_woofput);
-		struct wpcmd_woofput_arg *arg = theJob->arg = bp_getchunk(bp_jobobject_pool);
+		struct wpcmd_woofput_arg *arg = 
+			(struct wpcmd_woofput_arg *)(theJob->arg = bp_getchunk(bp_jobobject_pool));
 		strcpy(arg->woofname, CALL_WOOF_NAME); // set the woofname
 		strcpy(arg->handlername, "awspy_lambda"); // set the handlername
-		char *sharedbuff = bp_getchunk(bp_job_bigstringpool);
+		char *sharedbuff = (char *)bp_getchunk(bp_job_bigstringpool);
 		arg->payload = sharedbuff; // set the payload
 		memcpy(sharedbuff, woofputbuffer, CALL_WOOF_EL_SIZE);
 		free(woofputbuffer);
@@ -698,8 +600,9 @@ int callback_function_invoke (const struct _u_request * httprequest, struct _u_r
 		fprintf(stdout, "Result Woof was defined, so we are spinning until the result is available\n");
 
 		WPJob* theJob = create_job_easy(wp, wpcmd_waitforresult);
-		struct wpcmd_waitforresult_arg *arg = theJob->arg = bp_getchunk(bp_jobobject_pool);
-		char *result = theJob->result = bp_getchunk(bp_job_bigstringpool);
+		struct wpcmd_waitforresult_arg *arg = 
+			(struct wpcmd_waitforresult_arg *)(theJob->arg = bp_getchunk(bp_jobobject_pool));
+		char *result = (char *)(theJob->result = bp_getchunk(bp_job_bigstringpool));
 		arg->timeout = 30000L;
 		memcpy(&(arg->resultwoof), &resultwoof, sizeof(struct ResultWooF));
 		
