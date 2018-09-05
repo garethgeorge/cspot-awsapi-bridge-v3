@@ -31,12 +31,12 @@ CFLAGS=-pthread -lrt -g -I${UINC} -I${MINC} -I${SINC} -I.
 HAND1=awspy_lambda
 # HAND2=awsjs_lambda
 
-all: awsapi_client ${HAND1} utiltest
+all: lambda_client ${HAND1} utiltest
 
-awsapi_client: ${WINC} src/client/awsapi_client.cpp src/client/wpcmds.c ${MY_LIBS}
+lambda_client: ${WINC} src/client/lambda_client.cpp src/client/wpcmds.c ${MY_LIBS}
 	${CC} ${CFLAGS} -Wall -c src/client/wpcmds.c -o src/client/wpcmds.o
-	${CPPCC} ${CFLAGS} -Wall -o awsapi_client src/client/awsapi_client.cpp ${CSPOT_COMMON_LIBS} ${MY_LIBS} src/client/wpcmds.o -lulfius -ljansson
-	mkdir -p cspot; cp awsapi_client ./cspot 
+	${CPPCC} ${CFLAGS} -Wall -o lambda_client src/client/lambda_client.cpp ${CSPOT_COMMON_LIBS} ${MY_LIBS} src/client/wpcmds.o -lulfius -ljansson
+	mkdir -p cspot; cp lambda_client ./cspot 
 
 ${HAND1}: ${HAND1}.cpp ${SHEP_SRC} ${WINC} ${LINC} ${LOBJ} ${WOBJ} ${SLIB} ${SINC} ${MY_LIBS}
 	sed 's/WOOF_HANDLER_NAME/${HAND1}/g' ${SHEP_SRC} > ${HAND1}_shepherd.c

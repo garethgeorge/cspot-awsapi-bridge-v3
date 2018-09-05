@@ -168,8 +168,13 @@ struct CSPOTNamespace *namespace_for_function(const char *funcname) {
 
 				fprintf(stdout, "seting up resultwoof %s (%s)\n", woofname, woofpath);
 
-				struct stat st = {0};
-				if (stat(woofpath, &st) == -1) {
+				if (unlink(woofpath) != 0) {
+					fprintf(stderr, "Fatal error: failed to unlink result woof %s\n", woofname);
+					delete ns;
+					return NULL;
+				}
+
+				{
 					fprintf(stderr, "Result WooF '%s' does not exist, making it\n", woofpath);
 
 					WPJob* theJob = create_job_easy(wp, wpcmd_woofcreate);
@@ -396,7 +401,7 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 	if (metadata_file == NULL || fwrite(res_json_str, strlen(res_json_str), 1, metadata_file) < 0) {
 		fclose(metadata_file);
 		fprintf(stderr, "Fatal error: failed to write the metadata file\n");
-		json_decref(req_json);
+		json_decref(req_json); 
 		free((void *)res_json_str);
 		unlink(metadata_file_path);
 		ulfius_set_string_body_response(httpresponse, 500, "ServiceException");
@@ -649,6 +654,8 @@ void sig_handler(int sig) {
 
 int main(int argc, char **argv)
 {
+	ArgumentParser parser;
+
 	/*
 		start the web server
 	*/

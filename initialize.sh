@@ -5,6 +5,10 @@ fi
 
 curdir=$(pwd)
 
+
+echo "Installing OpenSSL"
+yum install openssl 
+
 echo "Installing the versions of Python available to lambdas, this might take a while"
 
 if [ ! -x "$(command -v python3.6)"] ; then 
