@@ -177,6 +177,164 @@ PyObject* get_python_method(PyObject *module, const char *method_name) {
 	return method;
 }
 
+const char *decode_python_string(PyObject *pystr) {
+	PyObject *unicode = PyUnicode_AsEncodedString(pystr, "utf-8", "~E~");
+	const char *result = strdup(PyBytes_AS_STRING(unicode));
+	Py_DECREF(unicode);
+	return result;
+}
+
+PyObject *helper_invoke_handler(struct FunctionMetadata *function_metadata, struct InvocationArguments *arguments, PyObject **error) {
+	// TODO: implement the invocation handler
+}
+
+int invoke_function(struct FunctionMetadata *function_metadata, struct InvocationArguments *arguments) {
+	// update the PYTHONPATH to include the current working directory
+	{
+		const char *pypath = getenv("PYTHONPATH");
+		char newpypath[1024];
+		sprintf(newpypath, "PYTHONPATH=%s:.", pypath);
+		putenv(newpypath);
+	}
+	fdebugf(stdout, "updated python path to include the current directory\n");
+
+	wchar_t *program_name = Py_DecodeLocale("main.py", NULL);
+	Py_SetProgramName(program_name);
+	Py_Initialize();
+
+	PyObject *main_module = PyImport_Import(PyUnicode_DecodeFSDefault("__main__"));
+	if (!main_module) {
+		fdebugf(stderr, "Fatal error: failed to get a handle on the main module __main__\n");
+		PyErr_Print();
+		fflush(stderr);
+		return -1;
+	}
+
+	fdebugf(stdout, "initializing helper functions\n");
+	create_python_helpers();
+	PyObject *pyfunc_parse_payload = get_python_method(main_module, "__pylambda_parse_payload");
+	PyObject *pyfunc_package_result = get_python_method(main_module, "__pylambda_package_result");
+	if (!pyfunc_parse_payload || !pyfunc_package_result) {
+		fdebugf(stderr, "Failed to get one of the helper functions, aborting\n");
+		return -1;
+	}
+
+	fdebugf(stdout, "getting a handle on the handler: %s.%s\n", 
+		function_metadata->python_package_name, 
+		function_metadata->python_function_name);
+
+	PyObject *lambda_module = PyImport_Import(PyUnicode_DecodeFSDefault(function_metadata->python_package_name));
+	if (!lambda_module) {
+		fdebugf(stderr, "Fatal error: the module '%s' did not exist or failed to load\n", 
+			function_metadata->python_package_name);
+		PyErr_Print();
+		return -1;
+	}
+	PyObject *lambda_function = get_python_method(lambda_module, function_metadata->python_function_name);
+	if (!lambda_function) {
+		fdebugf(stderr, 
+			"Fatal error: the function '%s' could not be found in package '%s'\n", 
+			function_metadata->python_function_name, function_metadata->python_package_name);
+		return -1;
+	}
+
+	// Packaging the arguments for the lambda function
+	fdebugf(stdout, "parsing the payload\n");
+	PyObject *args = PyTuple_New(1);
+	PyTuple_SetItem(args, 0, PyUnicode_DecodeFSDefault(arguments->payload_str));
+	PyObject *py_payload = PyObject_CallObject(pyfunc_parse_payload, args);
+	Py_DECREF(args);
+	if (!py_payload) {
+		PyErr_Print();
+		fdebugf(stderr, "Fatal error: failed to JSON decode the payload");
+		return -1;
+	}
+	fdebugf(stdout, "\tparsed payload: ");
+#ifdef DEBUG 
+	PyObject_Print(py_payload, stdout, Py_PRINT_RAW);
+#endif 
+	fdebugf(stdout, "\n");
+
+	// Invoking the lambda function
+	fdebugf(stdout, "invoking the lambda\n");
+	args = py_payload;
+	PyObject *py_lambda_result = PyObject_CallObject(lambda_function, args);
+
+	if (!py_lambda_result) {
+		PyObject *ptype, *pvalue, *ptraceback;
+		PyErr_Fetch(&ptype, &pvalue, &ptraceback);
+	const char *invocation_errormessage = NULL; 
+		invocation_errormessage = decode_python_string(pvalue);
+		Py_DECREF(ptype);
+		Py_DECREF(pvalue);
+		Py_DECREF(ptraceback);
+
+		// TODO: log out the error to a location where users can fetch the message
+		fdebugf(stderr, "Fatal error: enocuntered an error while invoking the lambda: \n%s\n", invocation_errormessage);
+		free((void *)invocation_errormessage);
+	}
+
+	// NO DECREF here b/c we just copied it
+	fdebugf(stdout, "\tlambda result: ");
+#ifdef DEBUG
+	PyObject_Print(py_lambda_result, stdout, Py_PRINT_RAW);
+#endif
+	fdebugf(stdout, "\n");
+
+	//
+	// finally, write the packaged result out to the 'result woof'
+	//
+	if (arguments->result_woof) {
+		// Invoking the packaging function
+		args = PyTuple_New(1);
+		Py_INCREF(py_lambda_result);
+		PyTuple_SetItem(args, 0, py_lambda_result); // SetItem does not aquire a ref, it steals one
+		PyObject *py_packaged_result = PyObject_CallObject(pyfunc_package_result, args);
+		if (!py_packaged_result) {
+			PyErr_Print();
+			fdebugf(stderr, "Fatal error: failed to JSON encode the result\n");
+			return -1;
+		}
+
+		const char *result_str = decode_python_string(py_packaged_result);
+
+		if (strlen(result_str) > RESULT_WOOF_EL_SIZE) {
+			fdebugf(stderr, "Fatal error: result object can not fit in ELEMENT_SIZE (%d bytes)\n", RESULT_WOOF_EL_SIZE);
+			free((void *)result_str);
+			return -1;
+		}
+
+		char result_element_buffer[RESULT_WOOF_EL_SIZE];
+		memset(result_element_buffer, 0, RESULT_WOOF_EL_SIZE);
+		strcpy(result_element_buffer, result_str);
+
+		int idx = WooFPut((char *)arguments->result_woof, NULL, result_element_buffer);
+		if (idx < 0) {
+			fdebugf(stderr, "Fatal error: failed to place the result in the woof specified\n");
+			return -1;
+		}
+		fdebugf(stdout, "Result successfully placed in result woof: '%s'\n", arguments->result_woof);
+	} else {
+		fdebugf(stdout, "No result woof specified. Nothing to do with the result, discarding it\n");
+	}
+
+	// free our memory
+	Py_DECREF(py_lambda_result);
+	Py_DECREF(py_payload);
+	Py_DECREF(main_module);
+	Py_DECREF(lambda_module);
+	Py_DECREF(lambda_function);
+	Py_DECREF(pyfunc_parse_payload);
+	Py_DECREF(pyfunc_package_result);
+
+	if (Py_FinalizeEx() < 0) {
+		return 120;
+	}
+	PyMem_RawFree(program_name);
+
+	return 0;
+}
+
 int awspy_lambda(WOOF *wf, unsigned long seq_no, void *ptr) {
 	struct InvocationArguments arguments;
 	struct FunctionMetadata *function_metadata;
@@ -188,7 +346,7 @@ int awspy_lambda(WOOF *wf, unsigned long seq_no, void *ptr) {
 	const char *ns = getenv("WOOFC_DIR");
 	chdir(ns); // NOTE at the moment this gets immeditaely overriden once we determine the function
 	fdebugf(stdout, "awspy_lambda invocation starting:\n");
-	fdebugf(stdout, "namespace directory: %s\n", getenv("WOOFC_DIR"));
+	fdebugf(stdout, "namespace directory: %s\n", ns);
 
 	// STEP 2) decode the function name & json data sections
 	fdebugf(stdout, "metadata: %s\n", input_data_buffer);
@@ -200,7 +358,6 @@ int awspy_lambda(WOOF *wf, unsigned long seq_no, void *ptr) {
 	}
 
 	// read a few keys from the json data and initialize the arguments struct 
-
 	arguments.function_name = json_get_str_for_key(json_data, "function");
 	arguments.result_woof = json_get_str_for_key(json_data, "result_woof");
 	arguments.payload_str = input_data_buffer + strlen(input_data_buffer) + 1;
@@ -241,144 +398,14 @@ int awspy_lambda(WOOF *wf, unsigned long seq_no, void *ptr) {
 		function_metadata->python_package_name,
 		function_metadata->python_function_name);
 
-	//
-	// BEGIN INTERACTING WITH PYTHON BY SETTING UP OUR HELPER FUNCTIONS
-	//
+	// change the working directory to be the location the function will be invoked from
 	if (chdir(function_metadata->function_directory) < 0) {
 		fdebugf(stderr, "Fatal error: failed to change directory to the function directory: '%s'\n", 
 			function_metadata->function_directory);
 		return -1;
 	}
 
-	// update the PYTHONPATH to include the current working directory
-	{
-		const char *pypath = getenv("PYTHONPATH");
-		char newpypath[1024];
-		sprintf(newpypath, "PYTHONPATH=%s:.", pypath);
-		putenv(newpypath);
-	}
-	fdebugf(stdout, "updated python path to include the current directory\n");
-
-	wchar_t *program_name = Py_DecodeLocale("main.py", NULL);
-	Py_SetProgramName(program_name);
-	Py_Initialize();
-
-	PyObject *main_module = PyImport_Import(PyUnicode_DecodeFSDefault("__main__"));
-	if (!main_module) {
-		fdebugf(stderr, "Fatal error: failed to get a handle on the main module __main__\n");
-		fflush(stderr);
-		return -1;
-	}
-
-	fdebugf(stdout, "initializing helper functions\n");
-	create_python_helpers();
-	PyObject *pyfunc_parse_payload = get_python_method(main_module, "__pylambda_parse_payload");
-	PyObject *pyfunc_package_result = get_python_method(main_module, "__pylambda_package_result");
-	if (!pyfunc_parse_payload || !pyfunc_package_result) {
-		fdebugf(stderr, "Failed to get one of the helper functions, aborting\n");
-		return -1;
-	}
-
-	fdebugf(stdout, "getting a handle on the handler: %s.%s\n", 
-		function_metadata->python_package_name, 
-		function_metadata->python_function_name);
-
-	PyObject *lambda_module = PyImport_Import(PyUnicode_DecodeFSDefault(function_metadata->python_package_name));
-	if (!lambda_module) {
-		fdebugf(stderr, "Fatal error: the module '%s' did not exist or failed to load\n", 
-			function_metadata->python_package_name);
-		return -1;
-	}
-	PyObject *lambda_function = get_python_method(lambda_module, function_metadata->python_function_name);
-	if (!lambda_function) {
-		fdebugf(stderr, 
-			"Fatal error: the function '%s' could not be found in package '%s'\n", 
-			function_metadata->python_function_name, function_metadata->python_package_name);
-		return -1;
-	}
-
-	// Packaging the arguments for the lambda function
-	fdebugf(stdout, "parsing the payload\n");
-	PyObject *args = PyTuple_New(1);
-	PyTuple_SetItem(args, 0, PyUnicode_DecodeFSDefault(arguments.payload_str));
-	PyObject *py_payload = PyObject_CallObject(pyfunc_parse_payload, args);
-	Py_DECREF(args);
-	if (!py_payload) {
-		PyErr_Print();
-		fdebugf(stderr, "Fatal error: failed to JSON decode the payload");
-		return -1;
-	}
-	fdebugf(stdout, "\tparsed payload: ");
-#ifdef DEBUG 
-	PyObject_Print(py_payload, stdout, Py_PRINT_RAW);
-#endif 
-	fdebugf(stdout, "\n");
-
-	// Invoking the lambda function
-	fdebugf(stdout, "invoking the lambda\n");
-	args = py_payload;
-	PyObject *py_lambda_result = PyObject_CallObject(lambda_function, args);
-	// NO DECREF here b/c we just copied it
-	fdebugf(stdout, "\tlambda result: ");
-#ifdef DEBUG
-	PyObject_Print(py_lambda_result, stdout, Py_PRINT_RAW);
-#endif
-	fdebugf(stdout, "\n");
-
-	// Invoking the packaging function
-	args = PyTuple_New(1);
-	Py_INCREF(py_lambda_result);
-	PyTuple_SetItem(args, 0, py_lambda_result); // SetItem does not aquire a ref, it steals one
-	PyObject *py_packaged_result = PyObject_CallObject(pyfunc_package_result, args);
-	if (!py_packaged_result) {
-		PyErr_Print();
-		fdebugf(stderr, "Fatal error: failed to JSON encode the result\n");
-		return -1;
-	}
-
-	//
-	// finally, write the packaged result out to the 'result woof'
-	//
-
-	PyObject *py_packaged_result_unicode = PyUnicode_AsEncodedString(py_packaged_result, "utf-8", "~E~");
-	const char *result_str = PyBytes_AS_STRING(py_packaged_result_unicode);
-	fdebugf(stdout, "\tpackaged result: %s\n", result_str);
-	Py_DECREF(py_packaged_result_unicode);
-
-	if (arguments.result_woof) {
-		if (strlen(result_str) > RESULT_WOOF_EL_SIZE) {
-			fdebugf(stderr, "Fatal error: result object can not fit in ELEMENT_SIZE (%d bytes)\n", RESULT_WOOF_EL_SIZE);
-			return -1;
-		}
-
-		char result_element_buffer[RESULT_WOOF_EL_SIZE];
-		memset(result_element_buffer, 0, RESULT_WOOF_EL_SIZE);
-		strcpy(result_element_buffer, result_str);
-
-		int idx = WooFPut((char *)arguments.result_woof, NULL, result_element_buffer);
-		if (idx < 0) {
-			fdebugf(stderr, "Fatal error: failed to place the result in the woof specified\n");
-			return -1;
-		}
-		fdebugf(stdout, "Result successfully placed in result woof: '%s'\n", arguments.result_woof);
-	} else {
-		fdebugf(stdout, "No result woof specified. Nothing to do with the result, discarding it\n");
-	}
-
-	// free our memory
-	Py_DECREF(py_packaged_result);
-	Py_DECREF(py_lambda_result);
-	Py_DECREF(py_payload);
-	Py_DECREF(main_module);
-	Py_DECREF(lambda_module);
-	Py_DECREF(lambda_function);
-	Py_DECREF(pyfunc_parse_payload);
-	Py_DECREF(pyfunc_package_result);
-
-	if (Py_FinalizeEx() < 0) {
-		return 120;
-	}
-	PyMem_RawFree(program_name);
+	invoke_function(function_metadata, &arguments);
 
 	free_function_metadata(function_metadata);
 	
@@ -386,3 +413,6 @@ int awspy_lambda(WOOF *wf, unsigned long seq_no, void *ptr) {
 
 	return 0;
 }
+
+
+

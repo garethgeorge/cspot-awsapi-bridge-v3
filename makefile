@@ -29,46 +29,38 @@ PYLIBS=$(shell ${PYVERSION}-config --ldflags) # python flags for linking
 CFLAGS=-pthread -lrt -g -I${UINC} -I${MINC} -I${SINC} -I.
 
 HAND1=awspy_lambda
-# HAND2=awsjs_lambda
 
-all: lambda_client ${HAND1} utiltest
+all: lambda_client s3_client ${HAND1} utiltest
 
-lambda_client: ${WINC} src/client/lambda_client.cpp src/client/wpcmds.c ${MY_LIBS}
-	${CC} ${CFLAGS} -Wall -c src/client/wpcmds.c -o src/client/wpcmds.o
-	${CPPCC} ${CFLAGS} -Wall -o lambda_client src/client/lambda_client.cpp ${CSPOT_COMMON_LIBS} ${MY_LIBS} src/client/wpcmds.o -lulfius -ljansson
+lambda_client: ${WINC} src/lambda/lambda_client.cpp src/lambda/wpcmds.o ${MY_LIBS}
+	${CPPCC} ${CFLAGS} -Wall -o lambda_client src/lambda/lambda_client.cpp \
+		${CSPOT_COMMON_LIBS} \
+		${MY_LIBS} \
+		src/lambda/wpcmds.o \
+		-lulfius -ljansson \
+		-lssl -lcrypto
 	mkdir -p cspot; cp lambda_client ./cspot 
+
+s3_client: ${WINC} src/client/s3_client.cpp ${MY_LIBS}
+	${CPPCC} ${CFLAGS} -Wall -o s3_client src/client/s3_client.cpp \
+		${CSPOT_COMMON_LIBS} \
+		${MY_LIBS} \
+		-lulfius -ljansson
+	mkdir -p cspot; cp s3_client ./cspot 
 
 ${HAND1}: ${HAND1}.cpp ${SHEP_SRC} ${WINC} ${LINC} ${LOBJ} ${WOBJ} ${SLIB} ${SINC} ${MY_LIBS}
 	sed 's/WOOF_HANDLER_NAME/${HAND1}/g' ${SHEP_SRC} > ${HAND1}_shepherd.c
 	${CC} ${CFLAGS} ${PYCFLAGS} -c ${HAND1}_shepherd.c -o ${HAND1}_shepherd.o
 	${CPPCC} ${CFLAGS} ${PYCFLAGS} -o ${HAND1} ${HAND1}.cpp ${HAND1}_shepherd.o ${CSPOT_COMMON_LIBS} ${MY_LIBS} ${PYLIBS} 
-	mkdir -p cspot; cp ${HAND1} ./cspot; cp ${WOOFC}/woofc-container ./cspot; cp ${WOOFC}/woofc-namespace-platform ./cspot
-
-# ${HAND2}: ${HAND1}.cpp ${SHEP_SRC} ${WINC} ${LINC} ${LOBJ} ${WOBJ} ${SLIB} ${SINC} ${MY_LIBS}
-# 	sed 's/WOOF_HANDLER_NAME/${HAND2}/g' ${SHEP_SRC} > ${HAND2}_shepherd.c
-# 	${CC} ${CFLAGS} ${PYCFLAGS} -c ${HAND2}_shepherd.c -o ${HAND2}_shepherd.o
-# 	${CPPCC} ${CFLAGS} ${PYCFLAGS} -o ${HAND2} ${HAND2}.cpp ${HAND2}_shepherd.o ${CSPOT_COMMON_LIBS} ${MY_LIBS} ${PYLIBS} 
-# 	mkdir -p cspot; cp ${HAND2} ./cspot; cp ${WOOFC}/woofc-container ./cspot; cp ${WOOFC}/woofc-namespace-platform ./cspot
 
 
-# helper libraries
-utiltest: utiltest.c lib/utility.o lib/wp.o
-	${CC} ${CFLAGS} -o utiltest utiltest.c lib/utility.o lib/wp.o
+# compile general object files
+%.o: %.cpp
+	${CPPCC} -c ${CFLAGS} $< -o $@
 
-lib/utility.o: lib/utility.c lib/utility.h
-	${CC} ${CFLAGS} -c lib/utility.c -o lib/utility.o
+%.o: %.c
+	${CC} -c ${CFLAGS} $< -o $@
 
-lib/wp.o: lib/wp.c lib/wp.h
-	${CC} ${CFLAGS} -c lib/wp.c -o lib/wp.o
-
-3rdparty/json.o: 3rdparty/json.c 3rdparty/json.h 
-	${CC} ${CFLAGS} -c 3rdparty/json.c -o 3rdparty/json.o 
-
-3rdparty/base64.o: 3rdparty/base64.c 3rdparty/base64.h 
-	${CC} ${CFLAGS} -c 3rdparty/base64.c -o 3rdparty/base64.o
-
-3rdparty/hashtable.o: 3rdparty/hashtable.c 3rdparty/hashtable.h 
-	${CC} ${CFLAGS} -c 3rdparty/hashtable.c -o 3rdparty/hashtable.o
 
 clean:
 	rm -f awsapi_client ${HAND1} *_shepherd.* *.o **/*.o

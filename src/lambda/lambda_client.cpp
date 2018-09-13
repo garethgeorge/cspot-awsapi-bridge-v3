@@ -250,7 +250,6 @@ int copy_file(const char *dstfilename, const char *srcfilename, int perms) {
 /*
 	API request handler for callback_function_create 
 */
-
 int callback_function_create (const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
 	fprintf(stdout, "\n\nPOST REQUEST: callback_function_create\n");
 	json_t* req_json = json_loadb((const char *)httprequest->binary_body, httprequest->binary_body_length, 0, NULL);
