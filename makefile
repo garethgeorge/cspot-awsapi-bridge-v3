@@ -32,11 +32,12 @@ HAND1=awspy_lambda
 
 all: lambda_client s3_client ${HAND1} utiltest
 
-lambda_client: ${WINC} src/lambda/lambda_client.cpp src/lambda/wpcmds.o ${MY_LIBS}
+lambda_client: ${WINC} src/lambda/lambda_client.cpp src/lambda/wpcmds.o src/lambda/function_helpers.o ${MY_LIBS}
 	${CPPCC} ${CFLAGS} -Wall -o lambda_client src/lambda/lambda_client.cpp \
 		${CSPOT_COMMON_LIBS} \
 		${MY_LIBS} \
 		src/lambda/wpcmds.o \
+		src/lambda/function_helpers.o \
 		-lulfius -ljansson \
 		-lssl -lcrypto
 	mkdir -p cspot; cp lambda_client ./cspot 
@@ -63,4 +64,5 @@ ${HAND1}: ${HAND1}.cpp ${SHEP_SRC} ${WINC} ${LINC} ${LOBJ} ${WOBJ} ${SLIB} ${SIN
 
 
 clean:
-	rm -f awsapi_client ${HAND1} *_shepherd.* *.o **/*.o
+	rm -f awsapi_client ${HAND1} *_shepherd.* 
+	find . -type f -name '*.o' -delete
