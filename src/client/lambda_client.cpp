@@ -338,7 +338,7 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 			ulfius_set_string_body_response(httpresponse, 500, "ServiceException");
 			return U_CALLBACK_CONTINUE;
 		}
-
+	
 		char buffer1[PATH_MAX];
 		char buffer2[PATH_MAX];
 		char buffer3[PATH_MAX];

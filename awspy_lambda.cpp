@@ -91,18 +91,13 @@ json_value *read_json_file(const char *fname) {
 	return parsed_json;
 }
 
-struct FunctionMetadata* load_function_metadata(const char *ns, const char *function_name) {
-	char func_defn_path[PATH_MAX];
-	sprintf(func_defn_path, "%s/%s-metadata.json", ns, function_name);
-	fdebugf(stdout, "function metadata directory: %s\n", func_defn_path);
-	json_value *func_metadata = read_json_file(func_defn_path);
-
+struct FunctionMetadata* load_function_metadata(const char *ns, json_value *func_metadata) {
 	if (!func_metadata) {
-		fdebugf(stderr, "Fatal error: function metadata corrupted or file did not exist\n");
+		fdebugf(stderr, "Fatal error: function metadata corrupted or did not exist\n");
 		return NULL;
 	}
 
-	struct FunctionMetadata *metadata =
+	struct FunctionMetadata *metadata = 
 		(struct FunctionMetadata *)malloc(sizeof(struct FunctionMetadata));
 	
 	metadata->function_directory = (char *)malloc(PATH_MAX);
@@ -182,10 +177,6 @@ const char *decode_python_string(PyObject *pystr) {
 	const char *result = strdup(PyBytes_AS_STRING(unicode));
 	Py_DECREF(unicode);
 	return result;
-}
-
-PyObject *helper_invoke_handler(struct FunctionMetadata *function_metadata, struct InvocationArguments *arguments, PyObject **error) {
-	// TODO: implement the invocation handler
 }
 
 int invoke_function(struct FunctionMetadata *function_metadata, struct InvocationArguments *arguments) {
@@ -380,10 +371,13 @@ int awspy_lambda(WOOF *wf, unsigned long seq_no, void *ptr) {
 
 
 	// load the function's metadata
-	if ((function_metadata = load_function_metadata(ns, arguments.function_name)) == NULL) {
+
+	json_value *function_metadata_json = json_object_value_of_key(json_data, "metadata");
+	if ((function_metadata = load_function_metadata(ns, function_metadata_json)) == NULL) {
 		fdebugf(stderr, "Fatal error encountered while loading metadata, aborting");
 		return -1;
 	}
+	
 	assert(function_metadata->function_name == arguments.function_name);
 	fdebugf(stdout, 
 		"metadata:\n"

@@ -16,7 +16,10 @@ extern int wpcmd_initdir(WP *wp, WPJob* job) {
 	fprintf(stdout, "Child process: chdir('%s')\n", arg->dir);
 	if (chdir(arg->dir) != 0)
 		return -1;
-	return WooFInit();
+	fprintf(stdout, "Childprocess: trying to woof init\n");
+	int retval = WooFInit();
+	fprintf(stdout, "WooFInit return value: %d\n", retval);
+	return retval;
 }
 
 extern int wpcmd_woofcreate(WP *wp, WPJob* job) {

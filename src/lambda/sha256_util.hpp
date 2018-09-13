@@ -3,7 +3,7 @@
 
 #include <openssl/sha.h>
 
-void sha256(char *string, char outputBuffer[65])
+inline void sha256(char *string, char outputBuffer[65])
 {
 	// see https://stackoverflow.com/questions/2262386/generate-sha256-with-openssl-and-c
 	unsigned char hash[SHA256_DIGEST_LENGTH];
@@ -19,7 +19,7 @@ void sha256(char *string, char outputBuffer[65])
 	outputBuffer[64] = 0;
 }
 
-int sha256_file(char *path, char outputBuffer[65])
+inline int sha256_file(char *path, char outputBuffer[65])
 {
 	typedef char byte;
 
