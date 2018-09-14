@@ -65,6 +65,45 @@ int copy_file(const char *dstfilename, const char *srcfilename, int perms) {
 /*
 	API request handler for callback_function_create 
 */
+
+int zip_from_base64_string(const char *b64string, char *zipfilepath, char *sha256outparam) {
+	int decoded_zip_len = Base64decode_len(b64string);
+	char *decoded_zip = (char *)malloc(decoded_zip_len);
+	if (!decoded_zip) {
+		fprintf(stderr, "Fatal error: failed to malloc memory for decoding zipfile\n");
+		throw AWSError(500, "ServiceException");
+	}
+
+	Base64decode(decoded_zip, b64string);
+
+	char sha256src[65];
+	sha256(decoded_zip, sha256src);
+	
+	sprintf(zipfilepath, "./functions/zips/%s.zip", sha256src);
+	FILE *zipfile = fopen(zipfilepath, "wb");
+	if (!zipfile) {
+		fprintf(stderr, "Fatal error: failed to open zipfile for writing\n");
+		free(decoded_zip);
+		throw AWSError(500, "ServiceException");
+	}
+
+	if (fwrite(decoded_zip, decoded_zip_len, 1, zipfile) < 0) {
+		free(decoded_zip);
+		fclose(zipfile);
+		fprintf(stderr, "Fatal error: failed to write the zipfile to the disk\n");
+		throw AWSError(500, "ServiceException");
+	}
+
+	free(decoded_zip);
+	fclose(zipfile);
+
+	if (sha256outparam != NULL) {
+		strcpy(sha256outparam, sha256src);
+	}
+
+	return decoded_zip_len;
+}
+
 int callback_function_create (const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
 	fprintf(stdout, "\n\nPOST REQUEST: callback_function_create\n");
 	json_t* req_json = json_loadb((const char *)httprequest->binary_body, httprequest->binary_body_length, 0, NULL);
@@ -91,9 +130,7 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 		}
 		
 		std::shared_ptr<FunctionProperties> func = std::make_shared<FunctionProperties>();
-		
 		func->name = funcname;
-		
 		const char *handler = json_string_value(json_object_get(req_json, "Handler"));
 		fprintf(stdout, "function handler: %s\n", handler);
 		if (handler == NULL || strstr(handler, ".") == NULL) {
@@ -104,51 +141,27 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 
 		// decode the zip file
 		fprintf(stdout, "decoding the source zip file and writing it to disk\n");
-		{
-			// NOTE: this needs to be updated to remove the entire directory on failure
-			const char *b64_encoded_func_zip = json_string_value(json_object_get(json_object_get(req_json, "Code"), "ZipFile"));
-			if (!b64_encoded_func_zip) {
-				fprintf(stderr, "Fatal error: ZipFile not provided\n");
-				throw AWSError(400, "InvalidParameterValueException");
-			}
-
-			int decoded_func_zip_len = Base64decode_len(b64_encoded_func_zip);
-			char *decoded_func_zip = (char *)malloc(decoded_func_zip_len);
-			if (!decoded_func_zip) {
-				fprintf(stderr, "Fatal error: failed to malloc memory for decoding zipfile\n");
-				json_decref(req_json);
-				throw AWSError(500, "ServiceException");
-			}
-
-			Base64decode(decoded_func_zip, b64_encoded_func_zip);
-
-			char sha256src[65];
-			sha256(decoded_func_zip, sha256src);
-			
-			char zipfilepath[PATH_MAX];
-			sprintf(zipfilepath, "./functions/zips/%s-%s.zip", funcname, sha256src);
-			FILE *zipfile = fopen(zipfilepath, "wb");
-			if (!zipfile) {
-				fprintf(stderr, "Fatal error: failed to open zipfile for writing\n");
-				free(decoded_func_zip);
-				throw AWSError(500, "ServiceException");
-			}
-
-			if (fwrite(decoded_func_zip, decoded_func_zip_len, 1, zipfile) < 0) {
-				free(decoded_func_zip);
-				fclose(zipfile);
-				fprintf(stderr, "Fatal error: failed to write the zipfile to the disk\n");
-				throw AWSError(500, "ServiceException");
-			}
-			free(decoded_func_zip);
-			fclose(zipfile);
-
-			func->src_zip_path = zipfilepath;
-			func->src_zip_sha256 = sha256src;
-
-			json_object_del(req_json, "Code");
+		char sha256src[65];
+	
+		// NOTE: this needs to be updated to remove the entire directory on failure
+		const char *b64_encoded_func_zip = json_string_value(json_object_get(json_object_get(req_json, "Code"), "ZipFile"));
+		if (!b64_encoded_func_zip) {
+			fprintf(stderr, "Fatal error: ZipFile not provided\n");
+			throw AWSError(400, "InvalidParameterValueException");
 		}
 
+		char zipfilepath[PATH_MAX];
+		int code_size = zip_from_base64_string(b64_encoded_func_zip, zipfilepath, sha256src);
+
+		func->src_zip_path = zipfilepath;
+		func->src_zip_sha256 = sha256src;
+
+		json_object_del(req_json, "Code");
+		json_object_set_new(req_json, "CodeSha256", json_string(sha256src));
+		json_object_set_new(req_json, "CodeSize", json_integer(code_size));
+		fprintf(stdout, "\tdecoded and wrote out zipfile, hash: %s\n", sha256src);
+
+		// done creating the function, write it out
 		fprintf(stdout, "now adding the function to the table");
 		funcMgr->addFunction(func);
 
@@ -162,6 +175,116 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 		free((void *)res_json_str);
 		json_decref(req_json);
 
+		return U_CALLBACK_CONTINUE;
+	} catch (const AWSError &e) {
+		fprintf(stderr, "Caught error: %s\n", e.msg.c_str());
+		json_decref(req_json);
+		ulfius_set_string_body_response(httpresponse, e.error_code, e.msg.c_str());
+		return U_CALLBACK_CONTINUE;
+	}
+}
+
+int callback_update_function_code(const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
+	fprintf(stdout, "\n\nPOST REQUEST: callback_update_function_code\n");
+	json_t* req_json = json_loadb((const char *)httprequest->binary_body, httprequest->binary_body_length, 0, NULL);
+	json_dumpfd(req_json, 1, JSON_INDENT(4));
+	fprintf(stdout, "\n");
+
+	// guard against the function locking.
+	std::lock_guard<std::mutex> guard(funcMgr->create_function_lock);
+
+	try {
+		fprintf(stdout, "decoding update function code request\n");
+		const char *funcname = u_map_get(httprequest->map_url, "name");
+		
+		fprintf(stdout, "create function: %s\n", funcname);
+
+		if (!FunctionProperties::validateFunctionName(funcname)) {
+			fprintf(stderr, "Fatal error: bad function name\n");
+			throw AWSError(400, "InvalidParameterValueException");
+		}
+
+		if (!funcMgr->functionExists(funcname)) {
+			fprintf(stderr, "Fatal error: no such function\n");
+			throw AWSError(404, "ResourceNotFoundException");
+		}
+		
+		std::shared_ptr<FunctionProperties> func = std::make_shared<FunctionProperties>(*(funcMgr->getFunction(funcname)));
+
+		// decode the zip file
+		fprintf(stdout, "decoding the source zip file and writing it to disk\n");
+		char sha256src[65];
+	
+		// NOTE: this needs to be updated to remove the entire directory on failure
+		const char *b64_encoded_func_zip = json_string_value(json_object_get(req_json, "ZipFile"));
+		if (!b64_encoded_func_zip) {
+			fprintf(stderr, "Fatal error: ZipFile not provided\n");
+			throw AWSError(400, "InvalidParameterValueException");
+		}
+
+		char zipfilepath[PATH_MAX];
+		int code_size = zip_from_base64_string(b64_encoded_func_zip, zipfilepath, sha256src);
+
+		func->src_zip_path = zipfilepath;
+		func->src_zip_sha256 = sha256src;
+
+		json_object_del(req_json, "Code");
+		json_object_set_new(req_json, "CodeSha256", json_string(sha256src));
+		json_object_set_new(req_json, "CodeSize", json_integer(code_size));
+		fprintf(stdout, "\tdecoded and wrote out zipfile, hash: %s\n", sha256src);
+
+		// done creating the function, write it out
+		fprintf(stdout, "now adding the function to the table");
+		funcMgr->addFunction(func);
+
+		const char *res_json_str = json_dumps(req_json, 0);
+		if (res_json_str == NULL) {
+			throw AWSError(500, "failed to stringify req json");
+		}
+
+		ulfius_set_string_body_response(httpresponse, 200, res_json_str);
+		fprintf(stdout, "Successfully updated function %s!\n", funcname);
+		free((void *)res_json_str);
+		json_decref(req_json);
+
+		return U_CALLBACK_CONTINUE;
+	} catch (const AWSError &e) {
+		fprintf(stderr, "Caught error: %s\n", e.msg.c_str());
+		json_decref(req_json);
+		ulfius_set_string_body_response(httpresponse, e.error_code, e.msg.c_str());
+		return U_CALLBACK_CONTINUE;
+	}
+}
+
+int callback_function_delete(const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
+	fprintf(stdout, "\n\nPOST REQUEST: callback_function_delete\n");
+	json_t* req_json = json_loadb((const char *)httprequest->binary_body, httprequest->binary_body_length, 0, NULL);
+	json_dumpfd(req_json, 1, JSON_INDENT(4));
+	fprintf(stdout, "\n");
+
+	// guard against the function locking.
+	std::lock_guard<std::mutex> guard(funcMgr->create_function_lock);
+
+	try {
+		fprintf(stdout, "decoding delete function code request\n");
+		const char *funcname = u_map_get(httprequest->map_url, "name");
+		
+		fprintf(stdout, "delete function: %s\n", funcname);
+
+		if (!FunctionProperties::validateFunctionName(funcname)) {
+			fprintf(stderr, "Fatal error: bad function name\n");
+			throw AWSError(400, "InvalidParameterValueException");
+		}
+
+		if (!funcMgr->functionExists(funcname)) {
+			fprintf(stderr, "Fatal error: no such function\n");
+			throw AWSError(404, "ResourceNotFoundException");
+		}
+
+		funcMgr->removeFunction(funcname);
+
+		ulfius_set_string_body_response(httpresponse, 204, "");
+		fprintf(stdout, "deleted function %s successfully\n", funcname);
 		return U_CALLBACK_CONTINUE;
 	} catch (const AWSError &e) {
 		fprintf(stderr, "Caught error: %s\n", e.msg.c_str());
@@ -420,9 +543,11 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Error ulfius_init_instance, abort\n");
 		return(1);
 	}
-
+	
 	ulfius_add_endpoint_by_val(&instance, "POST", "/2015-03-31/", "/functions", 0, &callback_function_create, NULL);
 	ulfius_add_endpoint_by_val(&instance, "POST", "/2015-03-31/", "/functions/:name/invocations", 0, &callback_function_invoke, NULL);
+	ulfius_add_endpoint_by_val(&instance, "PUT", "/2015-03-31/", "/functions/:name/code", 0, &callback_update_function_code, NULL);
+	ulfius_add_endpoint_by_val(&instance, "DELETE", "/2015-03-31/", "/functions/:name", 0, &callback_function_delete, NULL);
 
 	// Start the framework
 	signal(SIGINT, sig_handler);
