@@ -42,8 +42,8 @@ lambda_client: ${WINC} src/lambda/lambda_client.cpp src/lambda/wpcmds.o src/lamb
 		-lssl -lcrypto
 	mkdir -p cspot; cp lambda_client ./cspot 
 
-s3_client: ${WINC} src/client/s3_client.cpp ${MY_LIBS}
-	${CPPCC} ${CFLAGS} -Wall -o s3_client src/client/s3_client.cpp \
+s3_client: ${WINC} src/s3/s3_client.cpp ${MY_LIBS}
+	${CPPCC} ${CFLAGS} -Wall -o s3_client src/s3/s3_client.cpp \
 		${CSPOT_COMMON_LIBS} \
 		${MY_LIBS} \
 		-lulfius -ljansson
