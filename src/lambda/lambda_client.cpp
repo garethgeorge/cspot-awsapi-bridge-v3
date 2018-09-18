@@ -41,27 +41,6 @@ extern "C" {
 // manages all of the lambda functions etc.
 FunctionManager *funcMgr = nullptr;
 
-int copy_file(const char *dstfilename, const char *srcfilename, int perms) {
-	FILE *srcfile = fopen(srcfilename, "rb");
-	FILE *dstfile = fopen(dstfilename, "wb");
-	if (!srcfile || !dstfile) {
-		if (srcfile)
-			fclose(srcfile);
-		if (dstfile) 
-			fclose(dstfile);
-		return -1;
-	}
-
-	int chr;
-	while ((chr = fgetc(srcfile)) != EOF) {
-		fputc(chr, dstfile);
-	}
-
-	fclose(srcfile);
-	fclose(dstfile);
-
-	return chmod(dstfilename, perms);
-}
 /*
 	API request handler for callback_function_create 
 */
@@ -165,15 +144,18 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 		fprintf(stdout, "now adding the function to the table");
 		funcMgr->addFunction(func);
 
-		const char *res_json_str = json_dumps(req_json, 0);
-		if (res_json_str == NULL) {
+		json_decref(req_json);
+		json_t *dump = func->dumpJson();
+		const char *func_dump_str = json_dumps(dump, 0);
+		if (func_dump_str == NULL) {
+			json_decref(dump);
 			throw AWSError(500, "failed to stringify req json");
 		}
+		json_decref(dump);
 
-		ulfius_set_string_body_response(httpresponse, 200, res_json_str);
+		ulfius_set_string_body_response(httpresponse, 200, func_dump_str);
 		fprintf(stdout, "Successfully created function %s!\n", funcname);
-		free((void *)res_json_str);
-		json_decref(req_json);
+		free((void *)func_dump_str);
 
 		return U_CALLBACK_CONTINUE;
 	} catch (const AWSError &e) {
@@ -185,7 +167,7 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 }
 
 int callback_update_function_code(const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
-	fprintf(stdout, "\n\nPOST REQUEST: callback_update_function_code\n");
+	fprintf(stdout, "\n\nPUT REQUEST: callback_update_function_code\n");
 	json_t* req_json = json_loadb((const char *)httprequest->binary_body, httprequest->binary_body_length, 0, NULL);
 	json_dumpfd(req_json, 1, JSON_INDENT(4));
 	fprintf(stdout, "\n");
@@ -237,15 +219,19 @@ int callback_update_function_code(const struct _u_request * httprequest, struct 
 		fprintf(stdout, "now adding the function to the table");
 		funcMgr->addFunction(func);
 
-		const char *res_json_str = json_dumps(req_json, 0);
-		if (res_json_str == NULL) {
+		// dump the function and set it as the result string
+		json_decref(req_json);
+		json_t *dump = func->dumpJson();
+		const char *func_dump_str = json_dumps(dump, 0);
+		if (func_dump_str == NULL) {
+			json_decref(dump);
 			throw AWSError(500, "failed to stringify req json");
 		}
+		json_decref(dump);
 
-		ulfius_set_string_body_response(httpresponse, 200, res_json_str);
-		fprintf(stdout, "Successfully updated function %s!\n", funcname);
-		free((void *)res_json_str);
-		json_decref(req_json);
+		ulfius_set_string_body_response(httpresponse, 200, func_dump_str);
+		fprintf(stdout, "Successfully created function %s!\n", funcname);
+		free((void *)func_dump_str);
 
 		return U_CALLBACK_CONTINUE;
 	} catch (const AWSError &e) {
@@ -257,7 +243,7 @@ int callback_update_function_code(const struct _u_request * httprequest, struct 
 }
 
 int callback_function_delete(const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
-	fprintf(stdout, "\n\nPOST REQUEST: callback_function_delete\n");
+	fprintf(stdout, "\n\nDELETE REQUEST: callback_function_delete\n");
 	json_t* req_json = json_loadb((const char *)httprequest->binary_body, httprequest->binary_body_length, 0, NULL);
 	json_dumpfd(req_json, 1, JSON_INDENT(4));
 	fprintf(stdout, "\n");

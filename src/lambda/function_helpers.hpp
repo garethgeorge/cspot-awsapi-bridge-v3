@@ -10,34 +10,27 @@
 
 #include <lib/utility.h>
 #include <src/constants.h>
+#include <lib/awserror.hpp>
+
 #include "wpcmds.h"
 
 #include <jansson.h>
 
-// class for thrown errors
-struct AWSError : public std::exception {
-	const int error_code;
-	const std::string msg;
-	std::string details;
 
-	AWSError(int error_code, const char *message) : AWSError(error_code, std::string(message)) { };
-	AWSError(int error_code, const std::string message) : error_code(error_code), msg(message) {
-		this->details = message;
-	};
-
-	AWSError setDetails(std::string details) {
-		this->details = details;
-		return *this;
-	}
-};
 
 struct FunctionProperties;
 struct FunctionInstallation;
 struct FunctionManager;
 
 // class for managing the properties of functions we create
-struct FunctionProperties { // the virtual representation of the function
+class FunctionProperties { // the virtual representation of the function
+public:
 	FunctionManager *manager = nullptr;
+
+	struct FunctionPropertiesFactory {
+		// TODO: finish this factory class and then mark all the fields of FunctionProperties const 
+		// so that they can not be changed
+	};
 	
 	std::string name;
 	std::string handler;
@@ -66,6 +59,12 @@ struct FunctionProperties { // the virtual representation of the function
 
 	inline FunctionManager* getManager() const {
 		return this->manager;
+	}
+
+	std::string getArn() const {
+		char arn[512];
+		snprintf(arn, sizeof(arn), "arn:aws:lambda:function:%s", this->name.c_str());
+		return arn;
 	}
 
 	json_t *dumpJson() const;

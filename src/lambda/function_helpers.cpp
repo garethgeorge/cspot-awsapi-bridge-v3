@@ -53,7 +53,7 @@ FunctionProperties::FunctionProperties(json_t *json) {
 		throw AWSError(500, "failed to find src_zip_path in metadata");
 	this->src_zip_path = src_zip_path;
 
-	const char *src_zip_sha256 = json_string_value(json_object_get(json, "src_zip_sha256"));
+	const char *src_zip_sha256 = json_string_value(json_object_get(json, "CodeSha256"));
 	if (src_zip_sha256 == nullptr)
 		throw AWSError(500, "failed to find src_zip_sha256 in metadata");
 	this->src_zip_sha256 = src_zip_sha256;
@@ -64,7 +64,8 @@ json_t *FunctionProperties::dumpJson() const {
 	json_object_set_new(json, "FunctionName", json_string(this->name.c_str()));
 	json_object_set_new(json, "Handler", json_string(this->handler.c_str()));
 	json_object_set_new(json, "src_zip_path", json_string(this->src_zip_path.c_str()));
-	json_object_set_new(json, "src_zip_sha256", json_string(this->src_zip_sha256.c_str()));
+	json_object_set_new(json, "CodeSha256", json_string(this->src_zip_sha256.c_str()));
+	json_object_set_new(json, "FunctionArn", json_string(this->getArn().c_str()));
 	return json;
 }
 
@@ -185,7 +186,10 @@ FunctionInstallation::FunctionInstallation(const FunctionProperties& func, const
 		}
 
 		fprintf(stdout, "WooFCNamespacePlatform running for dir %s\n", this->install_path.c_str());
-		execl("./woofc-namespace-platform", "./woofc-namespace-platform", "-m", "4", "-M", "8", NULL);
+		
+		char parallelism_buf[6];
+		sprintf(parallelism_buf, "%d", WPTHREAD_COUNT);
+		execl("./woofc-namespace-platform", "./woofc-namespace-platform", "-m", parallelism_buf, "-M", parallelism_buf, NULL);
 		exit(0);
 	} else {
 		fprintf(stdout, "WoofCNamespacePlatform PID: %d\n", nspid);
@@ -196,7 +200,7 @@ FunctionInstallation::FunctionInstallation(const FunctionProperties& func, const
 	// spawn the worker process
 	std::cout << "function install: creating the worker process" << std::endl;
 	WP *wp = this->wp = new WP;
-	if (init_wp(wp, WORKER_QUEUE_DEPTH, wphandler_array, 4) < 0) {
+	if (init_wp(wp, WORKER_QUEUE_DEPTH, wphandler_array, WPTHREAD_COUNT) < 0) {
 		throw AWSError(500, "failed to create the worker process");
 	}
 

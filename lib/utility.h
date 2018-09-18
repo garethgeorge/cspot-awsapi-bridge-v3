@@ -1,6 +1,10 @@
 #ifndef DATASTRUCTURES_H
 #define DATASTRUCTURES_H
 
+/*
+	TODO: rename this header to something much more descriptive
+*/
+
 #include <semaphore.h>
 
 #ifdef __cplusplus
