@@ -10,7 +10,7 @@
 
 #include <lib/utility.h>
 #include <src/constants.h>
-#include <lib/awserror.hpp>
+#include <lib/aws.hpp>
 
 #include "wpcmds.h"
 
@@ -59,12 +59,6 @@ public:
 
 	inline FunctionManager* getManager() const {
 		return this->manager;
-	}
-
-	std::string getArn() const {
-		char arn[512];
-		snprintf(arn, sizeof(arn), "arn:aws:lambda:function:%s", this->name.c_str());
-		return arn;
 	}
 
 	json_t *dumpJson() const;

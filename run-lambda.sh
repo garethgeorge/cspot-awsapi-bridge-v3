@@ -2,7 +2,7 @@
 
 cd cspot 
 
-pkill woofc-namespace 
+# pkill woofc-namespace 
 
 ./lambda_client
 # ./s3_client

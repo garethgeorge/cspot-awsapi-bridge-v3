@@ -154,7 +154,7 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 		json_decref(dump);
 
 		ulfius_set_string_body_response(httpresponse, 200, func_dump_str);
-		fprintf(stdout, "Successfully created function %s!\n", funcname);
+		fprintf(stdout, "Successfully created function %s!\n", func->name.c_str());
 		free((void *)func_dump_str);
 
 		return U_CALLBACK_CONTINUE;
@@ -230,7 +230,7 @@ int callback_update_function_code(const struct _u_request * httprequest, struct 
 		json_decref(dump);
 
 		ulfius_set_string_body_response(httpresponse, 200, func_dump_str);
-		fprintf(stdout, "Successfully created function %s!\n", funcname);
+		fprintf(stdout, "Successfully created function %s!\n", func->name.c_str());
 		free((void *)func_dump_str);
 
 		return U_CALLBACK_CONTINUE;

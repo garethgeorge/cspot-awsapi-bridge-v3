@@ -3,7 +3,12 @@
 
 // OPTIONS FOR LAMBDA INVOCATIONS
 
+#define LAMBDA_API_ENDPOINT "http://cspot.lastpengu.in:8080"
+#define S3_API_ENDPOINT "http://cspot.lastpengu.in:8081"
+
 #define PARALLELISM_SUPPORT 4 
+
+#define FAKE_REGION "us-west-1"
 
 #define WPTHREAD_COUNT PARALLELISM_SUPPORT
 #define WORKER_QUEUE_DEPTH (PARALLELISM_SUPPORT * 2)

@@ -254,7 +254,7 @@ int invoke_function(struct FunctionMetadata *function_metadata, struct Invocatio
 	if (!py_lambda_result) {
 		PyObject *ptype, *pvalue, *ptraceback;
 		PyErr_Fetch(&ptype, &pvalue, &ptraceback);
-	const char *invocation_errormessage = NULL; 
+		const char *invocation_errormessage = NULL; 
 		invocation_errormessage = decode_python_string(pvalue);
 		Py_DECREF(ptype);
 		Py_DECREF(pvalue);

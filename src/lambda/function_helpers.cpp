@@ -65,7 +65,7 @@ json_t *FunctionProperties::dumpJson() const {
 	json_object_set_new(json, "Handler", json_string(this->handler.c_str()));
 	json_object_set_new(json, "src_zip_path", json_string(this->src_zip_path.c_str()));
 	json_object_set_new(json, "CodeSha256", json_string(this->src_zip_sha256.c_str()));
-	json_object_set_new(json, "FunctionArn", json_string(this->getArn().c_str()));
+	json_object_set_new(json, "FunctionArn", json_string(getArnForLambdaName(this->name.c_str()).c_str()));
 	return json;
 }
 

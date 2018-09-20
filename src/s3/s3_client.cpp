@@ -7,18 +7,19 @@
 #include <sys/stat.h>
 #include <mutex>
 #include <memory>
+#include <vector>
 #include <unordered_map>
 #include <iostream>
 #include <csignal>
+#include <ctime>
+#include <fstream>
 
 #include <src/constants.h>
 #include <3rdparty/base64.h>
 #include <3rdparty/rapidxml/rapidxml.hpp>
-#include <3rdparty/rapidxml/rapidxml_utils.hpp>
-#include <3rdparty/rapidxml/rapidxml_print.hpp>
 #include <lib/utility.h>
 #include <lib/wp.h>
-#include <lib/awserror.hpp>
+#include <lib/aws.hpp>
 #include <lib/fsutil.hpp>
 #include <lib/helpers.hpp>
 
@@ -57,23 +58,82 @@ const vector<const char *> eventTypes = {
 	"s3:ObjectRemoved:Delete"
 };
 
-// static const char *eventTypes[] = {
-// 	"s3:ObjectCreated:Put",
-// 	"s3:ObjectCreated:Post",
-// 	"s3:ObjectCreated:Copy",
-// 	"s3:ObjectRemoved:Delete",
-// 	nullptr
-// };
+class S3NotificationConfiguration {
+private:
 
-struct S3NotificationConfiguration {
+	unique_ptr<xml_document<>> readAndParseFile(std::istream& stream) {
+		std::string str((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
 
+		fprintf(stdout, "read from disk: %s\n", str.c_str());
+
+		unique_ptr<xml_document<>> doc = make_unique<xml_document<>>();
+		doc->parse<0>((char *)str.c_str());
+		return doc;
+	}
+
+public:
 	struct EventHandler {
 		std::string lambdaArn;
+
+		virtual void handleEvent(const std::string &eventName, json_t *event) {
+			// TODO: change this to use RabbitMQ to guarantee the delivery and execution
+			// of event notifications
+
+			fprintf(stdout, "handling event %s by invoking lambda %s\n", eventName.c_str(), lambdaArn.c_str());
+			
+			const char *dump = json_dumps(event, 0);
+			const std::string lambdaName = getNameFromLambdaArn(this->lambdaArn.c_str());
+
+			struct _u_map req_headers;
+			u_map_init(&req_headers);
+			u_map_put(&req_headers, "Content-Type", "application/json");
+			u_map_put(&req_headers, "X-Amz-Invocation-Type", "Event");
+		
+			struct _u_request request;
+			ulfius_init_request(&request);
+			request.http_verb = strdup("POST");
+			std::string http_url = (
+				std::string(LAMBDA_API_ENDPOINT "/2015-03-31/functions/") + 
+				lambdaName.c_str() + std::string("/invocations")).c_str();
+			request.http_url = strdup(http_url.c_str());
+			request.timeout = 30;
+			u_map_copy_into(request.map_header, &req_headers);
+
+			request.binary_body = (char *)dump;
+			request.binary_body_length = strlen(dump);
+
+			struct _u_response response;
+			fprintf(stdout, "Making HTTP request to URL %s\n", request.http_url);
+			ulfius_init_response(&response);
+			int retval = ulfius_send_http_request(&request, &response);
+			if (retval == U_OK) {
+				fprintf(stdout, "The HTTP response was U_OK, successful\n");
+
+				char *response_body = (char *) malloc(response.binary_body_length + 10);
+				strncpy(response_body, (char *)response.binary_body, response.binary_body_length);
+				response_body[response.binary_body_length] = '\0';
+				fprintf(stdout, "RESPONSE BODY: %s\n", response_body);
+				free(response_body);
+			} else {
+				fprintf(stderr, "Failed to invoke the handler lambda subscribed to this event\n");
+			}
+			ulfius_clean_response(&response);
+
+			
+			free((void *)dump);
+			u_map_clean(&req_headers);
+		}
+
+		virtual ~EventHandler() { };
 	};
 
 	unordered_map<
 		string, 
 		vector<unique_ptr<EventHandler>>> handlerMap;
+
+	S3NotificationConfiguration(std::istream& stream) : S3NotificationConfiguration(*readAndParseFile(stream)) {
+
+	}
 
 	template<typename T>
 	S3NotificationConfiguration(xml_document<T>& xmldocument) {
@@ -85,6 +145,14 @@ struct S3NotificationConfiguration {
 			cloudFuncConfig != nullptr; 
 			cloudFuncConfig = cloudFuncConfig->next_sibling("CloudFunctionConfiguration")) {
 			this->loadCloudFunctionConfiguration(*cloudFuncConfig);
+		}
+	}
+
+	void notify(const std::string& eventName, json_t *event) {
+		if (handlerMap.find(eventName) != handlerMap.end()) {
+			for (const auto& handler : handlerMap[eventName]) {
+				handler->handleEvent(eventName, event);
+			}
 		}
 	}
 
@@ -113,7 +181,7 @@ private:
 				if (strncmp(event, eventType, event_len) == 0) {
 					fprintf(stdout, "\tadded handler '%s' -> invoke '%s'\n", eventType, funcArn);
 					unique_ptr<EventHandler> handler = make_unique<EventHandler>();
-					handler->lambdaArn = *eventType;
+					handler->lambdaArn = funcArn;
 					
 					if (this->handlerMap.find(eventType) == this->handlerMap.end()) {
 						this->handlerMap[eventType] = vector<unique_ptr<EventHandler>>();
@@ -150,17 +218,24 @@ int callback_s3_put(const struct _u_request * httprequest, struct _u_response * 
 	fprintf(stdout, "\n\nPUT REQUEST: callback_s3_put\n");
 
 	// figure out the raw path the request specified 
-	char *raw_path = httprequest->http_url;
-	int raw_path_len = strlen(raw_path);
+	std::string raw_path = *(httprequest->http_url) == '/' ? httprequest->http_url + 1 : httprequest->http_url;
 	char key[255 * 2];
 
+	// figure out the bucketname
+	std::size_t slashPos = raw_path.find('/', 0);
+	if (slashPos == std::string::npos) {
+		throw AWSError(500, "Object path not specified, only found bucket name");
+	}
+	std::string bucket_name = raw_path.substr(0, slashPos);
+	std::string object_key = raw_path.substr(slashPos + 1);
+	
 	// make the key the base64 encoded path so that we escape symbols and all that
-	if (Base64encode_len(raw_path_len) >= MAX_PATH_LENGTH) {
+	if (Base64encode_len(raw_path.length()) >= MAX_PATH_LENGTH) {
 		throw AWSError(500, "path length too long");
 	}
-	Base64encode(key, raw_path, raw_path_len);
+	Base64encode(key, raw_path.c_str(), raw_path.length());
 	
-	fprintf(stdout, "putting as key %s (originally %s)\n", key, raw_path);
+	fprintf(stdout, "putting as key %s (originally %s) in bucket %s\n", key, raw_path.c_str(), bucket_name.c_str());
 
 	// store the payload in a new WooF at that location
 	size_t payload_size = httprequest->binary_body_length;
@@ -172,26 +247,81 @@ int callback_s3_put(const struct _u_request * httprequest, struct _u_response * 
 		throw AWSError(500, "Payload too large for the S3 object");
 	}
 
-	std::lock_guard<std::mutex> g(io_lock);
-	struct stat st = {0};
-	if (stat(key, &st) == -1) {
-		if (WooFCreate(key, sizeof(S3Object), 1) != 1) {
-			throw AWSError(500, "failed to create the WooF for the object");
+	{
+		std::lock_guard<std::mutex> g(io_lock);
+
+		struct stat st = {0};
+		if (stat(key, &st) == -1) {
+			if (WooFCreate(key, sizeof(S3Object), 1) != 1) {
+				throw AWSError(500, "failed to create the WooF for the object");
+			}
 		}
-	}
 
-	S3Object *obj = new S3Object;
-	memset((void *)obj, 0, sizeof(obj));
-	obj->size = payload_size;
-	memset(obj->payload, 0, sizeof(obj->payload));
-	memcpy(obj->payload, payload, payload_size);
-	if (WooFInvalid(WooFPut(key, NULL, (void *)obj))) {
+		S3Object *obj = new S3Object;
+		memset((void *)obj, 0, sizeof(obj));
+		obj->size = payload_size;
+		memset(obj->payload, 0, sizeof(obj->payload));
+		memcpy(obj->payload, payload, payload_size);
+		if (WooFInvalid(WooFPut(key, NULL, (void *)obj))) {
+			delete obj;
+			throw AWSError(500, "Failed to write the object into WooF");
+		}
 		delete obj;
-		throw AWSError(500, "Failed to write the object into WooF");
 	}
-	delete obj;
-
 	ulfius_set_string_body_response(httpresponse, 200, "");
+
+	// https://docs.aws.amazon.com/AmazonS3/latest/dev/notification-content-structure.html
+	if (notifConfig != nullptr) {
+		json_t *event_full = json_object();
+
+		json_t *event_records = json_array();
+		json_object_set(event_full, "Records", event_records);
+
+		json_t *event = json_object();
+		json_array_append(event_records, event);
+		json_decref(event_records);
+
+		// have put the event object in the event array
+		json_object_set_new(event, "eventVersion", json_string("2.0"));
+		json_object_set_new(event, "eventSource", json_string("aws:s3"));
+		json_object_set_new(event, "awsRegion", json_string(FAKE_REGION));
+		json_object_set_new(event, "eventName", json_string("s3:ObjectCreated:Put"));
+		{
+			// https://stackoverflow.com/questions/9527960/how-do-i-construct-an-iso-8601-datetime-in-c
+			time_t now;
+			time(&now);
+			char buf[sizeof "2011-10-08T07:07:09Z"];
+			strftime(buf, sizeof buf, "%FT%TZ", gmtime(&now));
+			json_object_set_new(event, "eventTime", json_string(buf));
+		}
+
+		json_t *event_s3 = json_object();
+		json_object_set(event, "s3", event_s3);
+
+		json_object_set_new(event_s3, "s3SchemaVersion", json_string("1.0"));
+		json_object_set_new(event_s3, "bucket", json_object());
+		
+		json_object_set_new(json_object_get(event_s3, "bucket"), "name", json_string(bucket_name.c_str()));
+		json_object_set_new(json_object_get(event_s3, "bucket"), "arn", 
+			json_string(getArnForBucketName(bucket_name.c_str()).c_str())
+		);
+
+		json_object_set_new(event_s3, "object", json_object());
+		json_object_set_new(json_object_get(event_s3, "object"), "key", json_string(object_key.c_str()));
+		json_object_set_new(json_object_get(event_s3, "object"), "size", json_integer(payload_size));
+
+		json_decref(event_s3);
+		json_decref(event);
+
+		fprintf(stdout, "JSON EVENT NOTIFICATION: \n");
+		json_dumpf(event_full, stdout, JSON_INDENT(2));
+		fprintf(stdout, "\n");
+
+		// dispatch the notification
+		notifConfig->notify("s3:ObjectCreated:Put", event);
+		json_decref(event_full);
+	}
+
 
 	return U_CALLBACK_CONTINUE;
 }
@@ -269,11 +399,27 @@ int callback_s3_put_notification(const struct _u_request * httprequest, struct _
 	try {
 
 		xml_document<> doc;
-		doc.parse<0>((char *)payload);
+		std::string payload_copy = payload;
+		doc.parse<0>((char *)payload_copy.c_str());
 
 		newConfig = make_unique<S3NotificationConfiguration>(doc);
 
 		fprintf(stdout, "successfully created new config from parsed XML\n");
+
+		notifConfig = std::move(newConfig);
+
+		FILE *notifConfigFile = fopen("notification-config.xml", "wb");
+		if (notifConfigFile == NULL) {
+			fprintf(stderr, "Fatal error: failed to write notification-config.xml\n");
+			throw AWSError(500, "ServiceException");
+		}
+
+		if (fwrite(payload, httprequest->binary_body_length, 1, notifConfigFile) < 0) {
+			fclose(notifConfigFile);
+			fprintf(stderr, "Fatal error: failed to write notification-config.xml\n");
+			throw AWSError(500, "ServiceException");
+		}
+		fclose(notifConfigFile);
 	} catch (const parse_error &e) {
 		fprintf(stderr, "Fatal error: failed to parse XML\n");
 		ulfius_set_string_body_response(httpresponse, 500, "ServiceException");
@@ -286,7 +432,6 @@ int callback_s3_put_notification(const struct _u_request * httprequest, struct _
 
 	return U_CALLBACK_CONTINUE;
 }
-
 
 void sig_handler(int sig) {
 	switch (sig) {
@@ -301,6 +446,7 @@ void sig_handler(int sig) {
 }
 
 int main(int argc, char **argv) {
+
 	/*
 		start the web server
 	*/
@@ -324,6 +470,19 @@ int main(int argc, char **argv) {
 	if (chdir("./s3objects") != 0) {
 		fprintf(stdout, "Fatal error: failed to change directory into the s3objects dir\n");
 		return 1;
+	}
+
+	// Load the xml notification config
+	std::ifstream notifConfigFile("notification-config.xml");
+	if (notifConfigFile.is_open()) {
+		fprintf(stdout, "found notification-config on disk\n");
+		try {
+			notifConfig = make_unique<S3NotificationConfiguration>(notifConfigFile);
+		} catch (const AWSError &e) {
+			fprintf(stderr, "FAILED TO LOAD notification-config.xml FROM DISK, ENCOUNTERED FORMAT ERROR\n");
+		} catch (const parse_error &e) {
+			fprintf(stderr, "FAILED TO LOAD notification-config.xml FROM DISK, ENCOUNTERED PARSE ERROR\n");
+		}
 	}
 
 	fprintf(stdout, "forking woofcnamespace platform\n");
