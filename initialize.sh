@@ -6,6 +6,15 @@ fi
 curdir=$(pwd)
 
 
+echo "Installing latest gcc and g++"
+sudo yum install centos-release-scl
+sudo yum install devtoolset-7-gcc
+sudo yum install devtoolset-7-gcc-c++
+scl enable devtoolset-7 bash
+
+echo "Install Boost"
+yum install boost-devel
+
 echo "Installing OpenSSL"
 yum install openssl 
 
@@ -25,7 +34,6 @@ if [ ! -x "$(command -v unzip)"] ; then
 else
 	echo "\talready installed"
 fi 
-
 
 echo "Installing ulfius"
 if [ ! -d "3rdparty/ulfios" ]; then
