@@ -6,9 +6,10 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
-#include <pthread.h>
 #include <mutex>
 #include <cassert>
+#include <memory>
+#include <unordered_map>
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,12 +21,16 @@ extern "C" {
 #include <jansson.h> // json library
 #endif
 
-
 #include <src/constants.h>
 #include <3rdparty/base64.h>
+#include <3rdparty/rapidxml/rapidxml.hpp>
+#include <3rdparty/rapidxml/rapidxml_utils.hpp>
+#include <3rdparty/rapidxml/rapidxml_print.hpp>
 #include <lib/utility.h>
 #include <lib/wp.h>
 #include <lib/awserror.hpp>
+#include <lib/fsutil.hpp>
+#include <lib/helpers.hpp>
 
 extern "C" {
 	#define LOG_H // prevent this header from loading, it causes problems
@@ -33,41 +38,33 @@ extern "C" {
 	#include "woofc-host.h"
 }
 
+#define MAX_PATH_LENGTH 255
 #define PORT 8081
+
+using namespace rapidxml;
 
 struct S3Object {
 	uint64_t size;
-	char lambda_endpoint[256];
-	char lambda_handlers[256];
+	char path[MAX_PATH_LENGTH];
 	char payload[1024 * 1024];
 };
 
-static int copy_file(const char *dstfilename, const char *srcfilename, int perms) {
-	fprintf(stdout, "copy %s -> %s\n", srcfilename, dstfilename);
-	FILE *srcfile = fopen(srcfilename, "rb");
-	FILE *dstfile = fopen(dstfilename, "wb");
-	if (!srcfile || !dstfile) {
-		fprintf(stdout, "src file: %lu\n", (unsigned long) srcfile);
-		fprintf(stdout, "dst file: %lu\n", (unsigned long) dstfile);
-		if (srcfile)
-			fclose(srcfile);
-		if (dstfile) 
-			fclose(dstfile);
-		return -1;
+struct S3NotificationConfiguration {
+
+	struct EventHandler {
+		std::string filter;
+	};
+
+	std::vector<EventHandler> event_handlers;
+
+	template<typename T>
+	S3NotificationConfiguration(xml_document<T>& xmldocument) {
+		
 	}
-
-	int chr;
-	while ((chr = fgetc(srcfile)) != EOF) {
-		fputc(chr, dstfile);
-	}
-
-	fclose(srcfile);
-	fclose(dstfile);
-
-	return chmod(dstfilename, perms);
-}
+};
 
 std::mutex lock;
+std::unique_ptr<S3NotificationConfiguration> notifConfig = nullptr;
 
 int callback_s3_put(const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
 	fprintf(stdout, "\n\nPUT REQUEST: callback_s3_put\n");
@@ -78,7 +75,7 @@ int callback_s3_put(const struct _u_request * httprequest, struct _u_response * 
 	char key[255 * 2];
 
 	// make the key the base64 encoded path so that we escape symbols and all that
-	if (Base64encode_len(raw_path_len) >= 255) {
+	if (Base64encode_len(raw_path_len) >= MAX_PATH_LENGTH) {
 		throw AWSError(500, "path length too long");
 	}
 	Base64encode(key, raw_path, raw_path_len);
@@ -128,7 +125,7 @@ int callback_s3_get(const struct _u_request * httprequest, struct _u_response * 
 	char key[255 * 2];
 
 	// make the key the base64 encoded path so that we escape symbols and all that
-	if (Base64encode_len(raw_path_len) >= 255) {
+	if (Base64encode_len(raw_path_len) >= MAX_PATH_LENGTH) {
 		throw AWSError(500, "path length too long");
 	}
 	Base64encode(key, raw_path, raw_path_len);
@@ -164,10 +161,16 @@ int callback_s3_request(const struct _u_request * httprequest, struct _u_respons
 	fprintf(stdout, "\n\nREQUEST TO S3 API URL: %s\n", httprequest->http_url);
 	ulfius_set_string_body_response(httpresponse, 200, "success\n");
 
-	if (strcmp(httprequest->http_verb, "PUT") == 0) {
+	try {
+		if (strcmp(httprequest->http_verb, "PUT") == 0) {
 		return callback_s3_put(httprequest, httpresponse, user_data);
-	} else if (strcmp(httprequest->http_verb, "GET") == 0) {
-		return callback_s3_get(httprequest, httpresponse, user_data);
+		} else if (strcmp(httprequest->http_verb, "GET") == 0) {
+			return callback_s3_get(httprequest, httpresponse, user_data);
+		}
+	} catch (const AWSError &e) {
+		fprintf(stderr, "Caught error: %s\n", e.msg.c_str());
+		ulfius_set_string_body_response(httpresponse, e.error_code, e.msg.c_str());
+		return U_CALLBACK_CONTINUE;
 	}
 	
 	fprintf(stdout, "UNRECOGNIZED HTTPVERB %s\n", httprequest->http_verb);
@@ -175,19 +178,46 @@ int callback_s3_request(const struct _u_request * httprequest, struct _u_respons
 	return U_CALLBACK_CONTINUE;
 }
 
-/*
------ Request Start ----->
+int callback_s3_put_notification(const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
+	fprintf(stdout, "\n\nREQUEST PUT NOTIFICATION: %s\n", httprequest->http_url);
 
+	const char *payload = (const char *)httprequest->binary_body;
+
+	std::unique_ptr<S3NotificationConfiguration> newConfig;
+	try {
+
+		xml_document<> doc;
+		doc.parse<0>((char *)payload);
+
+		newConfig = make_unique<S3NotificationConfiguration>(doc);
+
+		fprintf(stdout, "successfully created new config from parsed XML\n");
+	} catch (const parse_error &e) {
+		fprintf(stderr, "Fatal error: failed to parse XML\n");
+		ulfius_set_string_body_response(httpresponse, 500, "ServiceException");
+		return U_CALLBACK_CONTINUE;
+	} catch (const AWSError &e) { 
+		fprintf(stderr, "Caught error: %s\n", e.msg.c_str());
+		ulfius_set_string_body_response(httpresponse, e.error_code, e.msg.c_str());
+		return U_CALLBACK_CONTINUE;
+	}
+
+	return U_CALLBACK_CONTINUE;
+}
+
+/*
 /myBucket?notification
 Host: localhost:8081
 Accept-Encoding: identity
-Content-Length: 248
+Content-Length: 236
 User-Agent: aws-cli/1.16.7 Python/2.7.5 Linux/3.10.0-862.11.6.el7.x86_64 botocore/1.11.7
 
-<NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><TopicConfiguration><Topic>arn:aws:sns:us-west-2:123456789012:s3-notification-topic</Topic><Event>s3:ObjectCreated:*</Event></TopicConfiguration></NotificationConfiguration>
-<----- Request End -----
-
-127.0.0.1 - - [18/Sep/2018 07:59:32] "PUT /myBucket?notification HTTP/1.1" 200 -
+<NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+	<CloudFunctionConfiguration>
+		<CloudFunction>mylambdafunc</CloudFunction>
+		<Event>s3:ObjectCreated:*</Event>
+	</CloudFunctionConfiguration>
+</NotificationConfiguration>
 */
 
 void sig_handler(int sig) {
@@ -253,7 +283,7 @@ int main(int argc, char **argv) {
 	// NOTE: we do not require that buckets be explicitly created, you can just start using them 
 	// we will however implement a stubbed API or something eventually to allow compatibility
 	// b/c of some limitation we can't set the default endpoint without also adding a regular endpoint
-	ulfius_add_endpoint_by_val(&instance, "PUT", "/", "/:bucket/:path", 0, &callback_s3_put, NULL);
+	ulfius_add_endpoint_by_val(&instance, "PUT", "/", "/:bucket?notification", 0, &callback_s3_put_notification, NULL);
 	ulfius_set_default_endpoint(&instance, callback_s3_request, NULL);
 
 	// TODO: implement https://github.com/awslabs/lambda-refarch-mapreduce/blob/master/src/python/lambdautils.py#L88

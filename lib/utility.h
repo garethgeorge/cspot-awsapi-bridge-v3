@@ -6,6 +6,7 @@
 */
 
 #include <semaphore.h>
+#include <sema.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,9 +18,9 @@ struct Queue {
 	int size;
 	int size_bytes;
 	int elem_size;
-	sem_t space;
-	sem_t items;
-	sem_t mutex;
+	sema space;
+	sema items;
+	sema mutex;
 	void *elements;
 };
 
@@ -38,8 +39,8 @@ struct SharedBufferPool {
 	int size;
 	char *inuse;
 	void *chunks;
-	sem_t free_chunks;
-	sem_t mutex;
+	sema free_chunks;
+	sema mutex;
 };
 
 typedef struct SharedBufferPool SharedBufferPool;

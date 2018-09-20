@@ -11,16 +11,8 @@ int rmrfdir(const char *dir)
     FTS *ftsp = NULL;
     FTSENT *curr;
 
-    // Cast needed (in C) because fts_open() takes a "char * const *", instead
-    // of a "const char * const *", which is only allowed in C++. fts_open()
-    // does not modify the argument.
     char *files[] = { (char *) dir, NULL };
 
-    // FTS_NOCHDIR  - Avoid changing cwd, which could cause unexpected behavior
-    //                in multithreaded programs
-    // FTS_PHYSICAL - Don't follow symlinks. Prevents deletion of files outside
-    //                of the specified directory
-    // FTS_XDEV     - Don't cross filesystem boundaries
     ftsp = fts_open(files, FTS_NOCHDIR | FTS_PHYSICAL | FTS_XDEV, NULL);
     if (!ftsp) {
         fprintf(stderr, "%s: fts_open failed: %s\n", dir, strerror(errno));
@@ -69,6 +61,28 @@ finish:
     }
 
     return ret;
+}
+
+int copy_file(const char *dstfilename, const char *srcfilename, int perms) {
+	FILE *srcfile = fopen(srcfilename, "rb");
+	FILE *dstfile = fopen(dstfilename, "wb");
+	if (!srcfile || !dstfile) {
+		if (srcfile)
+			fclose(srcfile);
+		if (dstfile) 
+			fclose(dstfile);
+		return -1;
+	}
+
+	int chr;
+	while ((chr = fgetc(srcfile)) != EOF) {
+		fputc(chr, dstfile);
+	}
+
+	fclose(srcfile);
+	fclose(dstfile);
+
+	return chmod(dstfilename, perms);
 }
 
 #endif 

@@ -105,28 +105,6 @@ bool FunctionProperties::validateFunctionName(const char *str) {
     Function Installation method implementations
  *************************************************/
 
-static int copy_file(const char *dstfilename, const char *srcfilename, int perms) {
-	FILE *srcfile = fopen(srcfilename, "rb");
-	FILE *dstfile = fopen(dstfilename, "wb");
-	if (!srcfile || !dstfile) {
-		if (srcfile)
-			fclose(srcfile);
-		if (dstfile) 
-			fclose(dstfile);
-		return -1;
-	}
-
-	int chr;
-	while ((chr = fgetc(srcfile)) != EOF) {
-		fputc(chr, dstfile);
-	}
-
-	fclose(srcfile);
-	fclose(dstfile);
-
-	return chmod(dstfilename, perms);
-}
-
 FunctionInstallation::FunctionInstallation(const FunctionProperties& func, const std::string& path)
 		: function(&func), install_path(path) {
 	
@@ -204,14 +182,20 @@ FunctionInstallation::FunctionInstallation(const FunctionProperties& func, const
 		throw AWSError(500, "failed to create the worker process");
 	}
 
+	std::cout << "created the worker process successfully, woofinit the directory" << std::endl;
 	// change the workdir of the worker process to the correct directory & call WooFInit
 	{
 		WPJob* theJob = create_job_easy(wp, wpcmd_initdir);
+		std::cout << "created the job easily" << std::endl;
 		struct wpcmd_initdir_arg *arg = (struct wpcmd_initdir_arg *)bp_getchunk(mgr->bp_jobobject_pool);
+		std::cout << "got myself a chunk of shared memory" << std::endl;
 		strcpy(arg->dir, this->install_path.c_str());
 		theJob->arg = arg;
+		std::cout << "about to invoke" << std::endl;
 		int retval = wp_job_invoke(wp, theJob);
+		std::cout << "invoked the job" << std::endl;
 		bp_freechunk(mgr->bp_jobobject_pool, (void *)arg);
+		std::cout << "free'd that chunk!" << std::endl;
 		if (retval < 0) {
 			throw AWSError(500, "failed to change the working directory of the worker process");
 		}

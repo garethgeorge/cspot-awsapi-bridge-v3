@@ -69,7 +69,9 @@ void free_wp(WP *wp) {
 }
 
 WPJob* create_job(WP* wp, int commandid) {
+	fprintf(stdout, "create job, getting chunk\n");
 	WPJob *job = (WPJob *)bp_getchunk(wp->jobs);
+	fprintf(stdout, "create job, got chunk\n");
 	sem_init(&(job->resultready), 1, 0);
 	job->commandid = commandid;
 	job->error = 0;
@@ -79,6 +81,7 @@ WPJob* create_job(WP* wp, int commandid) {
 }
 
 WPJob* create_job_easy(WP* wp, WPHandler func) {
+	fprintf(stderr, "trying to create the job easily...\n");
 	int commandid = 0;
 	WPHandler *cur = wp->handlers;
 	while (*cur != NULL && *cur != func) {
