@@ -4,22 +4,12 @@
 #include <string.h>
 #include <linux/limits.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <sys/stat.h>
 #include <mutex>
-#include <cassert>
 #include <memory>
 #include <unordered_map>
-
-#ifdef __cplusplus
-extern "C" {
-	#include <ulfius.h> // rest API library
-	#include <jansson.h> // json library
-}
-#else 
-#include <ulfius.h> // rest API library
-#include <jansson.h> // json library
-#endif
+#include <iostream>
+#include <csignal>
 
 #include <src/constants.h>
 #include <3rdparty/base64.h>
@@ -32,6 +22,16 @@ extern "C" {
 #include <lib/fsutil.hpp>
 #include <lib/helpers.hpp>
 
+#ifdef __cplusplus
+extern "C" {
+	#include <ulfius.h> // rest API library
+	#include <jansson.h> // json library
+}
+#else 
+#include <ulfius.h> // rest API library
+#include <jansson.h> // json library
+#endif
+
 extern "C" {
 	#define LOG_H // prevent this header from loading, it causes problems
 	#include "woofc.h"
@@ -42,6 +42,7 @@ extern "C" {
 #define PORT 8081
 
 using namespace rapidxml;
+using namespace std;
 
 struct S3Object {
 	uint64_t size;
@@ -49,21 +50,100 @@ struct S3Object {
 	char payload[1024 * 1024];
 };
 
+const vector<const char *> eventTypes = {
+	"s3:ObjectCreated:Put",
+	"s3:ObjectCreated:Post",
+	"s3:ObjectCreated:Copy",
+	"s3:ObjectRemoved:Delete"
+};
+
+// static const char *eventTypes[] = {
+// 	"s3:ObjectCreated:Put",
+// 	"s3:ObjectCreated:Post",
+// 	"s3:ObjectCreated:Copy",
+// 	"s3:ObjectRemoved:Delete",
+// 	nullptr
+// };
+
 struct S3NotificationConfiguration {
 
 	struct EventHandler {
-		std::string filter;
+		std::string lambdaArn;
 	};
 
-	std::vector<EventHandler> event_handlers;
+	unordered_map<
+		string, 
+		vector<unique_ptr<EventHandler>>> handlerMap;
 
 	template<typename T>
 	S3NotificationConfiguration(xml_document<T>& xmldocument) {
+		xml_node<> *nodeNotifConfig = xmldocument.first_node("NotificationConfiguration");
+		if (nodeNotifConfig == nullptr) 
+			throw AWSError(500, "Did not find the NotificationConfiguration node in the xml document");
 		
+		for (xml_node<> *cloudFuncConfig = nodeNotifConfig->first_node("CloudFunctionConfiguration");
+			cloudFuncConfig != nullptr; 
+			cloudFuncConfig = cloudFuncConfig->next_sibling("CloudFunctionConfiguration")) {
+			this->loadCloudFunctionConfiguration(*cloudFuncConfig);
+		}
+	}
+
+private:
+	// list of allowable events found here: https://docs.aws.amazon.com/AmazonS3/latest/dev/NotificationHowTo.html
+
+	template<typename T>
+	void loadCloudFunctionConfiguration(xml_node<T>& cloudFuncConfig) {
+		fprintf(stdout, "loading cloud function configuration from XML\n");
+
+		xml_node<T>* funcArnNode = cloudFuncConfig.first_node("CloudFunction");
+		if (funcArnNode == nullptr) 
+			throw AWSError(500, "CloudFunctionConfiguration did not contain a 'CloudFunction' node specifying the function arn to invoke");
+
+		const char *funcArn = funcArnNode->value();
+
+		for (xml_node<T>* node = cloudFuncConfig.first_node("Event"); node != nullptr; node = node->next_sibling("Event")) {
+			const char *event = node->value();
+			int event_len = strlen(event);
+
+			// we just ignore the last character if its a wild card
+			if (event[event_len - 1] == '*')
+				event_len--;
+			
+			for (const char *eventType : eventTypes) {
+				if (strncmp(event, eventType, event_len) == 0) {
+					fprintf(stdout, "\tadded handler '%s' -> invoke '%s'\n", eventType, funcArn);
+					unique_ptr<EventHandler> handler = make_unique<EventHandler>();
+					handler->lambdaArn = *eventType;
+					
+					if (this->handlerMap.find(eventType) == this->handlerMap.end()) {
+						this->handlerMap[eventType] = vector<unique_ptr<EventHandler>>();
+					}
+					this->handlerMap[eventType].push_back(std::move(handler));
+				}
+			}
+		}
 	}
 };
 
-std::mutex lock;
+
+/*
+<NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+	<CloudFunctionConfiguration>
+		<CloudFunction>mylambdafunc</CloudFunction>
+		<Event>s3:ObjectCreated:*</Event>
+		<Filter>
+			<S3Key>
+				<FilterRule>
+					<Name>prefix</Name>
+					<Value>test</Value>
+				</FilterRule>
+			</S3Key>
+		</Filter>
+	</CloudFunctionConfiguration>
+</NotificationConfiguration>
+*/
+
+std::mutex io_lock;
 std::unique_ptr<S3NotificationConfiguration> notifConfig = nullptr;
 
 int callback_s3_put(const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
@@ -92,7 +172,7 @@ int callback_s3_put(const struct _u_request * httprequest, struct _u_response * 
 		throw AWSError(500, "Payload too large for the S3 object");
 	}
 
-	std::lock_guard<std::mutex> g(lock);
+	std::lock_guard<std::mutex> g(io_lock);
 	struct stat st = {0};
 	if (stat(key, &st) == -1) {
 		if (WooFCreate(key, sizeof(S3Object), 1) != 1) {
@@ -133,7 +213,7 @@ int callback_s3_get(const struct _u_request * httprequest, struct _u_response * 
 	fprintf(stdout, "getting with key %s (originally %s)\n", key, raw_path);
 
 	// read the file from the disk
-	std::lock_guard<std::mutex> g(lock);
+	std::lock_guard<std::mutex> g(io_lock);
 
 	struct stat st = {0};
 	if (stat(key, &st) == -1) {
@@ -182,8 +262,10 @@ int callback_s3_put_notification(const struct _u_request * httprequest, struct _
 	fprintf(stdout, "\n\nREQUEST PUT NOTIFICATION: %s\n", httprequest->http_url);
 
 	const char *payload = (const char *)httprequest->binary_body;
-
 	std::unique_ptr<S3NotificationConfiguration> newConfig;
+	fprintf(stdout, "%s\n", payload);
+
+	std::lock_guard<std::mutex> g(io_lock);
 	try {
 
 		xml_document<> doc;
@@ -205,20 +287,6 @@ int callback_s3_put_notification(const struct _u_request * httprequest, struct _
 	return U_CALLBACK_CONTINUE;
 }
 
-/*
-/myBucket?notification
-Host: localhost:8081
-Accept-Encoding: identity
-Content-Length: 236
-User-Agent: aws-cli/1.16.7 Python/2.7.5 Linux/3.10.0-862.11.6.el7.x86_64 botocore/1.11.7
-
-<NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-	<CloudFunctionConfiguration>
-		<CloudFunction>mylambdafunc</CloudFunction>
-		<Event>s3:ObjectCreated:*</Event>
-	</CloudFunctionConfiguration>
-</NotificationConfiguration>
-*/
 
 void sig_handler(int sig) {
 	switch (sig) {
@@ -271,7 +339,7 @@ int main(int argc, char **argv) {
 	fprintf(stdout, "sleep 1 second then WooFInit\n");
 
 	sleep(1);
-	assert(WooFInit() == 1);
+	WooFInit();
 
 	// Initialize instance with the port number
 	if (ulfius_init_instance(&instance, PORT, NULL, NULL) != U_OK) {
