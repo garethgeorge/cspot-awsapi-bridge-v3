@@ -90,7 +90,7 @@ std::shared_ptr<FunctionProperties> FunctionProperties::installFunction() const 
 		this->name.c_str(), this->src_zip_sha256.c_str());
 	
 	std::shared_ptr<FunctionInstallation> install = std::make_shared<FunctionInstallation>(copy, install_path);
-	return std::make_shared<FunctionProperties>(*this, std::move(install));
+	return std::make_shared<FunctionProperties>(*this, install);
 }
 
 bool FunctionProperties::validateFunctionName(const char *str) {

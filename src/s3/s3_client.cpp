@@ -132,7 +132,6 @@ public:
 		vector<unique_ptr<EventHandler>>> handlerMap;
 
 	S3NotificationConfiguration(std::istream& stream) : S3NotificationConfiguration(*readAndParseFile(stream)) {
-
 	}
 
 	template<typename T>
@@ -241,13 +240,17 @@ int callback_s3_put(const struct _u_request * httprequest, struct _u_response * 
 	size_t payload_size = httprequest->binary_body_length;
 	const char *payload = (const char *)httprequest->binary_body;
 
-	fprintf(stdout, "payload: (%lu)\n%s\n", (unsigned long)payload_size, payload);
-
 	if (payload_size > sizeof(S3Object().payload)) {
 		throw AWSError(500, "Payload too large for the S3 object");
 	}
 
+	unique_ptr<S3Object> obj = make_unique<S3Object>();
+	memset((void *)(obj.get()), 0, sizeof(S3Object));
+	obj->size = payload_size;
+	memcpy(obj->payload, payload, payload_size);
+	fprintf(stdout, "payload: (%lu)\n%s\n", (unsigned long)obj->size, obj->payload);
 	{
+		fprintf(stdout, "Acquire the IO lock and write the file\n");
 		std::lock_guard<std::mutex> g(io_lock);
 
 		struct stat st = {0};
@@ -257,17 +260,11 @@ int callback_s3_put(const struct _u_request * httprequest, struct _u_response * 
 			}
 		}
 
-		S3Object *obj = new S3Object;
-		memset((void *)obj, 0, sizeof(obj));
-		obj->size = payload_size;
-		memset(obj->payload, 0, sizeof(obj->payload));
-		memcpy(obj->payload, payload, payload_size);
-		if (WooFInvalid(WooFPut(key, NULL, (void *)obj))) {
-			delete obj;
+		if (WooFInvalid(WooFPut(key, NULL, (void *)(obj.get())))) {
 			throw AWSError(500, "Failed to write the object into WooF");
 		}
-		delete obj;
 	}
+
 	ulfius_set_string_body_response(httpresponse, 200, "");
 
 	// https://docs.aws.amazon.com/AmazonS3/latest/dev/notification-content-structure.html
@@ -483,6 +480,8 @@ int main(int argc, char **argv) {
 		} catch (const parse_error &e) {
 			fprintf(stderr, "FAILED TO LOAD notification-config.xml FROM DISK, ENCOUNTERED PARSE ERROR\n");
 		}
+	} else {
+		fprintf(stdout, "No notification-config.xml found, NO NOTIFICATIONS WILL BE DELIVERED\n");
 	}
 
 	fprintf(stdout, "forking woofcnamespace platform\n");
