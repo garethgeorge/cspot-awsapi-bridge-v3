@@ -285,7 +285,7 @@ int callback_s3_put(const struct _u_request * httprequest, struct _u_response * 
 		fprintf(stdout, "\n");
 
 		// dispatch the notification
-		bucket.notifConfig->notify("s3:ObjectCreated:Put", event);
+		bucket.notifConfig->notify("s3:ObjectCreated:Put", event_full);
 		json_decref(event_full);
 	}
 
