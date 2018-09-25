@@ -327,6 +327,18 @@ void FunctionManager::removeFunction(const char *funcname) {
 void FunctionManager::addFunction(std::shared_ptr<FunctionProperties>& func) {
 	func->manager = this;
 
+	{
+		std::lock_guard<std::mutex> g(this->lambda_functions_lock);
+		this->lambda_functions.erase(func->name);
+		this->lambda_functions[func->name] = func;
+
+		fprintf(stdout, "function manager adding function '%s' (hash: %s)\n", 
+			func->name.c_str(),
+			func->src_zip_sha256.c_str());
+		fprintf(stdout, "the hash of the function now in the manager is: %s\n", 
+		this->lambda_functions[func->name]->src_zip_sha256.c_str());
+	}
+
 	json_t *json = func->dumpJson();
 
 	char *metadata_str = json_dumps(json, 0);
@@ -340,7 +352,7 @@ void FunctionManager::addFunction(std::shared_ptr<FunctionProperties>& func) {
 	this->metadata_path_for_function(func->name.c_str(), output_path);
 
 	FILE *metadata_file = fopen(output_path, "wb");
-	if (!metadata_file) {
+	if (!metadata_file) {  
 		free(metadata_str);
 		throw AWSError(500, "failed to open metadata file for writing");
 	}
@@ -353,9 +365,6 @@ void FunctionManager::addFunction(std::shared_ptr<FunctionProperties>& func) {
 
 	fclose(metadata_file);
 	free(metadata_str);
-
-	std::lock_guard<std::mutex> g(this->lambda_functions_lock);
-	lambda_functions[func->name] = func;
 }
 
 std::shared_ptr<const FunctionProperties> FunctionManager::getFunction(const char *funcname) {

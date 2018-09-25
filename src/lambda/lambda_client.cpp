@@ -141,7 +141,7 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 		fprintf(stdout, "\tdecoded and wrote out zipfile, hash: %s\n", sha256src);
 
 		// done creating the function, write it out
-		fprintf(stdout, "now adding the function to the table");
+		fprintf(stdout, "now adding the function to the function table\n");
 		funcMgr->addFunction(func);
 
 		json_decref(req_json);
@@ -154,7 +154,7 @@ int callback_function_create (const struct _u_request * httprequest, struct _u_r
 		json_decref(dump);
 
 		ulfius_set_string_body_response(httpresponse, 200, func_dump_str);
-		fprintf(stdout, "Successfully created function %s!\n", func->name.c_str());
+		fprintf(stdout, "Successfully created function '%s'!\n", func->name.c_str());
 		free((void *)func_dump_str);
 
 		return U_CALLBACK_CONTINUE;
@@ -191,7 +191,8 @@ int callback_update_function_code(const struct _u_request * httprequest, struct 
 			throw AWSError(404, "ResourceNotFoundException");
 		}
 		
-		std::shared_ptr<FunctionProperties> func = std::make_shared<FunctionProperties>(*(funcMgr->getFunction(funcname)));
+		const FunctionProperties &origFunc = *(funcMgr->getFunction(funcname));
+		std::shared_ptr<FunctionProperties> func = std::make_shared<FunctionProperties>(origFunc);
 
 		// decode the zip file
 		fprintf(stdout, "decoding the source zip file and writing it to disk\n");
@@ -209,6 +210,7 @@ int callback_update_function_code(const struct _u_request * httprequest, struct 
 
 		func->src_zip_path = zipfilepath;
 		func->src_zip_sha256 = sha256src;
+		func->installation = nullptr;
 
 		json_object_del(req_json, "Code");
 		json_object_set_new(req_json, "CodeSha256", json_string(sha256src));
@@ -216,7 +218,7 @@ int callback_update_function_code(const struct _u_request * httprequest, struct 
 		fprintf(stdout, "\tdecoded and wrote out zipfile, hash: %s\n", sha256src);
 
 		// done creating the function, write it out
-		fprintf(stdout, "now adding the function to the table");
+		fprintf(stdout, "now adding the function to the table\n");
 		funcMgr->addFunction(func);
 
 		// dump the function and set it as the result string
@@ -230,7 +232,7 @@ int callback_update_function_code(const struct _u_request * httprequest, struct 
 		json_decref(dump);
 
 		ulfius_set_string_body_response(httpresponse, 200, func_dump_str);
-		fprintf(stdout, "Successfully created function %s!\n", func->name.c_str());
+		fprintf(stdout, "Successfully created function '%s'!\n", func->name.c_str());
 		free((void *)func_dump_str);
 
 		return U_CALLBACK_CONTINUE;
@@ -303,6 +305,7 @@ int callback_function_invoke (const struct _u_request * httprequest, struct _u_r
 			fprintf(stderr, "Fatal error: bad function name\n");
 			throw AWSError(400, "InvalidParameterValueException");
 		}
+
 
 		if (!funcMgr->functionExists(funcname)) {
 			fprintf(stderr, "Fatal error: no such function\n");
@@ -509,7 +512,7 @@ int main(int argc, char **argv)
 		start the web server
 	*/
 	struct _u_instance instance;
-
+	
 	funcMgr = new FunctionManager;
 	funcMgr->install_base_dir = "./functions/installs";
 	funcMgr->metadata_base_dir = "./functions/metadata";

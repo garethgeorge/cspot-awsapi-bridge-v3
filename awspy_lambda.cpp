@@ -221,6 +221,7 @@ int invoke_function(struct FunctionMetadata *function_metadata, struct Invocatio
 		PyErr_Print();
 		return -1;
 	}
+	
 	PyObject *lambda_function = get_python_method(lambda_module, function_metadata->python_function_name);
 	if (!lambda_function) {
 		fdebugf(stderr, 
@@ -251,17 +252,20 @@ int invoke_function(struct FunctionMetadata *function_metadata, struct Invocatio
 	args = py_payload;
 	PyObject *py_lambda_result = PyObject_CallObject(lambda_function, args);
 
-	if (!py_lambda_result) {
+	if (PyErr_Occurred()) {
+		fprintf(stdout, "Detected that an error occured. Fetching and printing that error\n");
 		PyObject *ptype, *pvalue, *ptraceback;
 		PyErr_Fetch(&ptype, &pvalue, &ptraceback);
 		const char *invocation_errormessage = NULL; 
-		invocation_errormessage = decode_python_string(pvalue);
+		PyObject *pystr = PyObject_Str(pvalue);
+		invocation_errormessage = decode_python_string(pystr);
+		Py_DECREF(pystr);
 		Py_DECREF(ptype);
 		Py_DECREF(pvalue);
 		Py_DECREF(ptraceback);
 
 		// TODO: log out the error to a location where users can fetch the message
-		fdebugf(stderr, "Fatal error: enocuntered an error while invoking the lambda: \n%s\n", invocation_errormessage);
+		fdebugf(stderr, "Fatal error: encountered an error while invoking the lambda: '%s'\n", invocation_errormessage);
 		free((void *)invocation_errormessage);
 	}
 
@@ -371,7 +375,6 @@ int awspy_lambda(WOOF *wf, unsigned long seq_no, void *ptr) {
 
 
 	// load the function's metadata
-
 	json_value *function_metadata_json = json_object_value_of_key(json_data, "metadata");
 	if ((function_metadata = load_function_metadata(ns, function_metadata_json)) == NULL) {
 		fdebugf(stderr, "Fatal error encountered while loading metadata, aborting");
