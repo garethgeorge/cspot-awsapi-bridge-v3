@@ -174,7 +174,7 @@ int callback_update_function_code(const struct _u_request * httprequest, struct 
 
 	// guard against the function locking.
 	std::lock_guard<std::mutex> guard(funcMgr->create_function_lock);
-
+	
 	try {
 		fprintf(stdout, "decoding update function code request\n");
 		const char *funcname = u_map_get(httprequest->map_url, "name");

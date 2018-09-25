@@ -41,7 +41,10 @@ inline std::string getArnForLambdaName(const char *lambdaName) {
 inline std::string getNameFromLambdaArn(const char *lambdaArn) {
 	const constexpr size_t min_len = sizeof("arn:aws:lambda:function:") - 1;
 	if (strlen(lambdaArn) <= min_len) {
-		throw AWSError(500, "Invalid ARN, too short to contain name");
+		char buff[1024];
+		memset(buff, 0, sizeof(buff));
+		snprintf(buff, sizeof(buff)-1, "Invalid ARN (%s), too short to contain function name", buff);
+		throw AWSError(500, buff);
 	}
 	return std::string(lambdaArn + min_len);
 }

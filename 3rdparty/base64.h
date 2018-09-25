@@ -85,6 +85,9 @@
 #define _BASE64_H_
 
 #ifdef __cplusplus
+#include <string>
+#include <memory>
+
 extern "C" {
 #endif
 
@@ -96,6 +99,20 @@ int Base64decode(char * plain_dst, const char *coded_src);
 
 #ifdef __cplusplus
 }
+
+// add an additonal function if this is C++ that works with standard string
+std::string Base64encode(const std::string &str) {
+	std::unique_ptr<char []> b64(new char[Base64encode_len(str.length())]);
+	std::size_t length = Base64encode(b64.get(), str.c_str(), str.length());
+	return std::string(b64.get(), length);
+}
+
+std::string Base64decode(std::string &str) {
+	std::unique_ptr<char []> plain(new char[Base64decode_len(str.c_str())]);
+	std::size_t length = Base64decode(plain.get(), str.c_str());
+	return std::string(plain.get(), length);
+}
+
 #endif
 
 #endif //_BASE64_H_
