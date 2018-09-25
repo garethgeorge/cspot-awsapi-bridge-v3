@@ -56,7 +56,7 @@ int zip_from_base64_string(const char *b64string, char *zipfilepath, char *sha25
 	Base64decode(decoded_zip, b64string);
 
 	char sha256src[65];
-	sha256(decoded_zip, sha256src);
+	sha256(decoded_zip, decoded_zip_len, sha256src);
 	
 	sprintf(zipfilepath, "./functions/zips/%s.zip", sha256src);
 	FILE *zipfile = fopen(zipfilepath, "wb");

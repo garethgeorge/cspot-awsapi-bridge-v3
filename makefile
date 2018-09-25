@@ -26,7 +26,7 @@ PYVERSION=python3.6
 PYCFLAGS=$(shell ${PYVERSION}-config --cflags | sed 's/\-Wall//g' | sed 's/\-Wstrict-prototypes//g') # python flags for include paths
 PYLIBS=$(shell ${PYVERSION}-config --ldflags) # python flags for linking
 
-CFLAGS=-pthread -lrt -g -O2 -I${UINC} -I${MINC} -I${SINC} -I.
+CFLAGS=-pthread -lrt -g -I${UINC} -I${MINC} -I${SINC} -I.
 CPPFLAGS=${CFLAGS}
 
 HAND1=awspy_lambda
