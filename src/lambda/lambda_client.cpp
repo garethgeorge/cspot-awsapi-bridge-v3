@@ -25,6 +25,7 @@ extern "C" {
 #include <3rdparty/base64.h>
 #include <lib/utility.h>
 #include <lib/wp.h>
+#include <lib/sha256_util.hpp>
 
 extern "C" {
 	#define LOG_H // prevent this header from loading
@@ -34,7 +35,6 @@ extern "C" {
 #include "wpcmds.h"
 
 #include "function_helpers.hpp"
-#include "sha256_util.hpp"
 
 #define PORT 8080
 
@@ -207,7 +207,7 @@ int callback_update_function_code(const struct _u_request * httprequest, struct 
 
 		char zipfilepath[PATH_MAX];
 		int code_size = zip_from_base64_string(b64_encoded_func_zip, zipfilepath, sha256src);
-
+		
 		func->src_zip_path = zipfilepath;
 		func->src_zip_sha256 = sha256src;
 		func->installation = nullptr;

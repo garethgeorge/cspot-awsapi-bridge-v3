@@ -3,6 +3,7 @@
 
 #include <openssl/sha.h>
 
+#define SHA256_BASE16DIGEST_LENGTH (65)
 inline void sha256(char *string, unsigned long length, char outputBuffer[65])
 {
 	// see https://stackoverflow.com/questions/2262386/generate-sha256-with-openssl-and-c

@@ -6,7 +6,7 @@
 #define LAMBDA_API_ENDPOINT "http://cspot.lastpengu.in:8080"
 #define S3_API_ENDPOINT "http://cspot.lastpengu.in:8081"
 
-#define PARALLELISM_SUPPORT 4 
+#define PARALLELISM_SUPPORT 8 
 
 #define FAKE_REGION "us-west-1"
 

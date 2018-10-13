@@ -13,6 +13,7 @@
 #include <csignal>
 #include <ctime>
 #include <fstream>
+#include <random>
 
 #include <src/constants.h>
 #include <3rdparty/base64.h>
@@ -22,6 +23,7 @@
 #include <lib/aws.hpp>
 #include <lib/fsutil.hpp>
 #include <lib/helpers.hpp>
+#include <lib/sha256_util.hpp>
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,7 +46,191 @@ extern "C" {
 #define MAX_PATH_LENGTH 255
 #define PORT 8081
 
+#define RUN_TESTS
+
 using namespace std;
+
+struct S3LogRef {
+	int64_t logId = -1;
+	int64_t recordIdx = -1; // index of the record in the log
+	S3LogRef() : logId(-1), recordIdx(-1) {};
+	S3LogRef(uint64_t logId, uint64_t recordIdx) : logId(logId), recordIdx(recordIdx) {};
+};
+
+template<size_t record_size>
+class S3StorageLog {
+	std::mutex lock;
+	uint64_t capacity = 0;
+	uint64_t used = 0;
+	uint64_t logId = 0;
+	std::string logName;
+
+	bool initialized = false;
+
+	void initialize() {
+		if (!initialized) {
+			WooFCreate((char *)this->logName.c_str(), record_size, this->capacity);
+			initialized = true;
+		}
+	}
+public:
+	constexpr static uint64_t recordSize = record_size;
+
+	struct OutOfSpaceException : public std::exception {
+	};
+	
+	S3StorageLog(uint64_t recordCount) {
+		fprintf(stdout, "Constructed S3StorageLog with capacity %lu records of size %lu (total storage %lu)\n", recordCount, recordSize, recordCount * recordSize);
+		this->capacity = recordCount;
+
+		// generate an ID for the next log with a very low probability of collision
+		std::random_device rd;
+		std::default_random_engine generator(rd());
+		std::uniform_int_distribution<long long unsigned> distribution(0,0xFFFFFFFFFFFFFFFF);
+		this->logId = distribution(generator);
+		this->logName = getLogName(this->logId);
+
+		struct stat st = {0};
+		if (stat(this->logName.c_str(), &st) != -1) {
+			throw AWSError(500, "S3StorageLog picked an identifier that was already in use. The probability of this is INCREDIBLY low. Oops.");
+		}
+	}
+
+	uint64_t getLogID() {
+		return logId;
+	}
+
+	uint64_t getRecordSize() {
+		return recordSize;
+	}
+
+	S3LogRef append(void *data) {
+		std::lock_guard<std::mutex> guard(this->lock);
+		
+		if (this->used >= this->capacity) {
+			throw OutOfSpaceException();
+		}
+
+		this->initialize();
+		this->used++;
+		long idx = WooFPut((char *)this->logName.c_str(), NULL, (char *)data);
+		if (WooFInvalid(idx)) {
+			throw AWSError(500, "failed to WooFPut record into the log");
+		}
+		// fprintf(stdout, "appended record to log %s at idx %li\n", this->logName.c_str(), idx);
+
+		return S3LogRef(this->logId, idx);
+	}
+
+	static std::string getLogName(uint64_t logid) {
+		char buffer[128];
+		snprintf(buffer, sizeof(buffer) - 1, "%lx.shard.log", logid);
+		return buffer;
+	}
+
+	static void get(const S3LogRef logref, void *result) {
+		std::string logName = getLogName(logref.logId);
+		if (WooFGet((char *)logName.c_str(), (char *)result, logref.recordIdx) != 1) {
+			throw AWSError(500, "Bad LogId when attempting to get element from log");
+		}
+	}
+};
+
+template<size_t record_size>
+class S3LogWriter {
+public:
+	uint64_t objectsPerLog;
+	std::unique_ptr<S3StorageLog<record_size>> storageLog = nullptr;
+
+	S3LogWriter() : S3LogWriter(256) {
+	}
+
+	S3LogWriter(uint64_t objectsPerLog) {
+		this->objectsPerLog = objectsPerLog;
+		this->refreshLog();
+	}
+
+	void refreshLog() {
+		this->storageLog = std::unique_ptr<S3StorageLog<record_size>>(new S3StorageLog<record_size>(objectsPerLog));
+	}
+
+	S3LogRef append(void *data) {
+		try {
+			return this->storageLog->append(data);
+		} catch (typename S3StorageLog<record_size>::OutOfSpaceException& e) {
+			fprintf(stdout, "current log (id: %lu) ran out of space, replacing with a new log\n", this->storageLog->getLogID());
+			this->refreshLog();
+		}
+		return this->storageLog->append(data);
+	}
+
+	void get(const S3LogRef logref, void *result) {
+		S3StorageLog<record_size>::get(logref, result);
+	}
+};
+
+struct S3FileSystem {
+	// each log holds 16 megabytes of data
+	constexpr static size_t S3FILE_SHARD_BYTES = 16 * 1024;
+	constexpr static size_t S3OBJECTS_PER_LOG = 1024;
+
+	struct FileExistsException : public std::exception { };
+	struct FileDoesNotExistException : public std::exception { };
+
+	struct S3Shard {
+		S3LogRef nextShard; // may be initialized as some sort of null value
+		uint64_t data_remaining = 0;
+		uint8_t data[S3FILE_SHARD_BYTES];
+	};
+
+	std::unordered_map<std::string, S3LogRef> files;
+	S3LogWriter<sizeof(S3Shard)> theShardWriter = S3LogWriter<sizeof(S3Shard)>(S3OBJECTS_PER_LOG);
+
+	S3LogRef writeBuffer(void *data, size_t data_len) {
+		// fprintf(stdout, "Writing ... data remaining ... %lu\n", data_len);
+		if (data_len > S3FILE_SHARD_BYTES) {
+			// fprintf(stdout, "\twrite large chunk and set nextShard to the appropriate ref\n");
+			auto nextShardRef = writeBuffer((void *)((uint8_t *)data + S3FILE_SHARD_BYTES), data_len - S3FILE_SHARD_BYTES);
+			// fprintf(stdout, "\t\twrote the chunk as ref %lx:%lu\n", nextShardRef.logId, nextShardRef.recordIdx);
+
+			std::unique_ptr<S3Shard> shard(new S3Shard);
+			shard->data_remaining = data_len;
+			memcpy(&(shard->data), data, S3FILE_SHARD_BYTES);
+			shard->nextShard = nextShardRef;
+			return this->theShardWriter.append((void *)shard.get());
+		} else {
+			// fprintf(stdout, "\twrite small and final chunk\n");
+			std::unique_ptr<S3Shard> shard(new S3Shard);
+			shard->data_remaining = data_len;
+			memcpy(&(shard->data), data, data_len);
+			return this->theShardWriter.append((void *)shard.get());
+		}
+	}
+
+	std::string readBuffer(S3LogRef ref) {
+		std::stringstream ss(std::stringstream::binary | std::stringstream::out);
+		
+		while (ref.logId != -1) {
+			// fprintf(stdout, "reading ... read from ref %lx:%lu\n", ref.logId, ref.recordIdx);
+			std::unique_ptr<S3Shard> shard(new S3Shard);
+			S3StorageLog<sizeof(S3Shard)>::get(ref, (void *)shard.get());
+			size_t data_in_shard = 
+				shard->data_remaining > S3FileSystem::S3FILE_SHARD_BYTES ? 
+				S3FileSystem::S3FILE_SHARD_BYTES : shard->data_remaining;
+			// fprintf(stdout, "\tdata in shard: %d\n", data_in_shard);
+			ss.write((char const*)shard->data, data_in_shard);
+			ref = shard->nextShard;
+		}
+
+		return ss.str();
+	}
+
+	S3LogRef writeFile(const std::string &key, void *data, size_t data_len) {
+		S3LogRef retval = this->writeBuffer(data, data_len);
+		fprintf(stdout, "Done writing file\n");
+		return retval;
+	}
+};
 
 struct S3Object {
 	uint64_t size;
@@ -214,14 +400,22 @@ int callback_s3_put(const struct _u_request * httprequest, struct _u_response * 
 	const char *payload = (const char *)httprequest->binary_body;
 	
 	if (payload_size > sizeof(S3Object().payload)) {
-		throw AWSError(500, "Payload too large for the S3 object");
+		char buff[1024];
+		snprintf(buff, sizeof(buff), "Payload too large for the S3 object, max size: %lu", sizeof(S3Object().payload));
+		throw AWSError(500, buff);
 	}
 	
 	unique_ptr<S3Object> obj = make_unique<S3Object>();
 	memset((void *)(obj.get()), 0, sizeof(S3Object));
 	obj->size = payload_size;
 	memcpy((void *)obj->payload, (void *)payload, payload_size);
-	fprintf(stdout, "payload: (%lu)\n%s\n", (unsigned long)obj->size, obj->payload);
+
+	if (obj->size < 4096) {
+		fprintf(stdout, "payload: (%lu)\n%s\n", (unsigned long)obj->size, obj->payload);
+	} else {
+		fprintf(stdout, "payload: (%lu) <too large to print>\n", (unsigned long)obj->size);
+	}
+
 	{
 		struct stat st = {0};
 		if (stat(b64key.c_str(), &st) == -1) {
@@ -412,6 +606,8 @@ void sig_handler(int sig) {
 	}
 }
 
+void run_tests();
+
 int main(int argc, char **argv) {
 
 	/*
@@ -454,6 +650,11 @@ int main(int argc, char **argv) {
 	sleep(1);
 	WooFInit();
 
+#ifdef RUN_TESTS
+	// a small test suite to run when RUN_TESTS is defined
+	run_tests();
+#endif
+
 	// Initialize instance with the port number
 	if (ulfius_init_instance(&instance, PORT, NULL, NULL) != U_OK) {
 		fprintf(stderr, "Error ulfius_init_instance, abort\n");
@@ -484,4 +685,42 @@ int main(int argc, char **argv) {
 
 	// PyMem_RawFree(program);
 	return 0;
+}
+
+
+void run_s3_tests() {
+	fprintf(stdout, "Testing the new S3 filesystem\n");
+	
+	std::array<size_t, 9> sizes = {
+		1000,
+		10000,
+		100000,
+		1000000,
+		1000000,
+		10000000,
+		1000000,
+		1000000,
+		10000000
+	};
+
+	S3FileSystem fs;
+
+	for (auto size : sizes) {
+		std::stringstream ss;
+		for (size_t i = 0; i < size; ++i) {
+			ss << i << ", ";
+		}
+
+		S3LogRef ref = fs.writeFile("helloworld.txt", (void *)ss.str().c_str(), ss.str().length());
+		std::string output = fs.readBuffer(ref);
+		fprintf(stdout, "length out %d == length written %d\n", output.length(), ss.str().length());
+		assert(output.length() == ss.str().length());
+	}
+
+	exit(0);
+}
+
+
+void run_tests() {
+	run_s3_tests();
 }

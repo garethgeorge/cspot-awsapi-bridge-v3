@@ -6,17 +6,17 @@ fi
 curdir=$(pwd)
 
 
-echo "Installing latest gcc and g++"
-sudo yum install centos-release-scl
-sudo yum install devtoolset-7-gcc
-sudo yum install devtoolset-7-gcc-c++
-scl enable devtoolset-7 bash
+# echo "Installing latest gcc and g++"
+# sudo yum install centos-release-scl
+# sudo yum install devtoolset-7-gcc
+# sudo yum install devtoolset-7-gcc-c++
+# scl enable devtoolset-7 bash
 
-echo "Install Boost"
+# echo "Install Boost"
 yum install boost-devel
 
 echo "Installing OpenSSL"
-yum install openssl 
+yum install openssl openssl-devel 
 
 echo "Installing the versions of Python available to lambdas, this might take a while"
 
@@ -29,34 +29,31 @@ else
 fi 
 
 echo "Installing the unzip command "
-if [ ! -x "$(command -v unzip)"] ; then 
-	yum install -y unzip 
-else
-	echo "\talready installed"
-fi 
+yum install -y unzip 
 
 echo "Installing ulfius"
-if [ ! -d "3rdparty/ulfios" ]; then
+if [ ! -d "3rdparty/ulfius" ]; then
 	yum install \
 		gnutls-devel \
 		systemd-devel \
 		libmicrohttpd-devel \
 		jansson-devel \
 		libcurl-devel -y
-
-	git clone git@github.com:babelouest/ulfius.git ./3rdparty/ulfius
+	
+	mkdir -p ./3rdparty/ulfius 
 	cd ./3rdparty/ulfius
-	ldconfig 
-	git submodule init 
-	git submodule update -r 
 
-	cd lib/orcania
+	git clone https://github.com/babelouest/orcania.git
+	git clone https://github.com/babelouest/yder.git
+	git clone https://github.com/babelouest/ulfius.git
+	cd orcania/
 	make && sudo make install
-	cd ../yder
+	cd ../yder/
 	make && sudo make install
-	cd ../..
-	make 
-	sudo make install
+	cd ../ulfius/src/
+	make && sudo make install
+	
+	cd $curdir
 else 
 	echo "\talready installed"
 fi

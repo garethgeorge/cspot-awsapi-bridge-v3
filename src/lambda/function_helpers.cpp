@@ -1,10 +1,5 @@
 #include <cstring>
 
-#include "function_helpers.hpp"
-#include "sha256_util.hpp"
-
-#include <lib/fsutil.hpp>
-
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -17,6 +12,11 @@
 #include <cassert>
 
 #include <src/constants.h>
+#include <lib/sha256_util.hpp>
+#include <lib/fsutil.hpp>
+
+
+#include "function_helpers.hpp"
 
 std::mutex used_function_name_lock;
 std::unordered_set<std::string> used_function_names;
