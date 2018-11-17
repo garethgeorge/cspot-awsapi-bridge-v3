@@ -19,6 +19,15 @@ const array<const char *, 4> eventTypes = {
 	"s3:ObjectRemoved:Delete"
 };
 
+
+class EventFilter {
+public:
+	virtual bool filter(const std::string &eventName, json_t *event) = 0;
+
+	virtual ~EventFilter() {
+	}
+};
+
 struct EventHandler {
 	virtual void handleEvent(const std::string &eventName, json_t *event) = 0;
 
@@ -28,8 +37,14 @@ struct EventHandler {
 
 struct LambdaEventHandler : public EventHandler {
 	std::string lambdaArn;
+	std::shared_ptr<EventFilter> eventFilter;
 
 	virtual void handleEvent(const std::string &eventName, json_t *event) override {
+		if (!eventFilter->filter(eventName, event)) {
+			fprintf(stdout, "not invoking lambda %s, did not pass filter\n", lambdaArn.c_str());
+			return ;
+		}
+
 		// TODO: change this to use RabbitMQ to guarantee the delivery and execution
 		// of event notifications
 
@@ -75,48 +90,64 @@ struct LambdaEventHandler : public EventHandler {
 
 		u_map_clean(&req_headers);
 	}
+
+	virtual ~LambdaEventHandler() {
+
+	}
 };
 
-struct EventFilter {
-	virtual bool filter(json_t *event) = 0;
-};
 
-struct EventFilterAnd : public EventFilter {
-	vector<unique_ptr<EventFilter>> filters;
+class EventFilterAnd : public EventFilter {
+public:
+	vector<shared_ptr<EventFilter>> filters;
 
-	virtual bool filter(json_t *event) override {
-		for (unique_ptr<EventFilter>& filter : this->filters) {
-			if (!filter->filter(event))
+	virtual bool filter(const std::string &eventName, json_t *event) override {
+		fprintf(stdout, "evaluating EventAndFilter in response to event %s\n", eventName.c_str());
+		for (auto& filter : this->filters) {
+			if (!filter->filter(eventName, event))
 				return false;
 		}
 		return true;
 	}
 
-	void addFilter(unique_ptr<EventFilter> &&filter) {
-		this->filters.push_back(std::move(filter));
+	void addFilter(shared_ptr<EventFilter> &&filter) {
+		this->filters.push_back(filter);
+	}
+
+	virtual ~EventFilterAnd() override {
 	}
 };
 
-struct S3EventFilterPrefix : public EventFilter {
+class S3EventFilterPrefix : public EventFilter {
+public:
 	const string prefix;
 
-	S3EventFilterPrefix(std::string& prefix) : prefix(prefix) {
+	S3EventFilterPrefix(const std::string& prefix) : prefix(prefix) {
 	}
 
-	virtual bool filter(json_t *event) override {
-		json_t *s3 = json_object_get(event, "s3");
+	virtual bool filter(const std::string &eventName, json_t *event) override {
+		fprintf(stdout, "evaluating S3EventFilterPrefix in response to event %s\n", eventName.c_str());
+		json_t *records = json_object_get(event, "Records");
+		if (!records || json_array_size(records) != 1) 
+			return false;
+		json_t *firstRecord = json_array_get(records, (size_t)0);
+		json_t *s3 = json_object_get(firstRecord, "s3");
 		if (!s3) 
 			return false;
-		json_t *object = json_object_get(event, "object");
+		json_t *object = json_object_get(s3, "object");
 		if (!object) 
 			return false;
 		const char *key = json_string_value(json_object_get(object, "key"));
 		if (!key)
 			return false;
 		// check that the two strings have the same prefix
+		fprintf(stdout, "comparing %s with %s\n", key, prefix.c_str());
 		if (strncmp(key, prefix.c_str(), prefix.length()) != 0)
 			return false;
 		return true;
+	}
+
+	virtual ~S3EventFilterPrefix() {
 	}
 };
 
@@ -197,6 +228,15 @@ private:
 
 		const char *funcArn = funcArnNode->value();
 
+		// try to decode any filters if possible
+		xml_node<T> *filterNode = cloudFuncConfig.first_node("Filter");
+		shared_ptr<EventFilter> eventFilter;
+		if (filterNode != nullptr) {
+			eventFilter = this->decodeFilter(*filterNode);
+		} else {
+			eventFilter = std::shared_ptr<EventFilter>(new EventFilterAnd);
+		}
+
 		for (xml_node<T>* node = cloudFuncConfig.first_node("Event"); node != nullptr; node = node->next_sibling("Event")) {
 			const char *event = node->value();
 			int event_len = strlen(event);
@@ -205,11 +245,13 @@ private:
 			if (event[event_len - 1] == '*')
 				event_len--;
 			
+			// check if it is a valid event type
 			for (const char *eventType : eventTypes) {
 				if (strncmp(event, eventType, event_len) == 0) {
 					fprintf(stdout, "\tadded handler '%s' -> invoke '%s'\n", eventType, funcArn);
-					unique_ptr<LambdaEventHandler> handler = make_unique<LambdaEventHandler>();
+					unique_ptr<LambdaEventHandler> handler(new LambdaEventHandler());
 					handler->lambdaArn = funcArn;
+					handler->eventFilter = eventFilter;
 					
 					if (this->handlerMap.find(eventType) == this->handlerMap.end()) {
 						this->handlerMap[eventType] = vector<unique_ptr<EventHandler>>();
@@ -222,26 +264,34 @@ private:
 
 	// takes the filter node as its argument
 	template<typename T>
-	unique_ptr<EventFilter> decodeFilter(xml_node<T>& filter_node) {
-		unique_ptr<EventFilterAnd> andFilter = make_unique<EventFilterAnd>();
-
+	shared_ptr<EventFilter> decodeFilter(xml_node<T>& filter_node) {
+		shared_ptr<EventFilterAnd> andFilter = shared_ptr<EventFilterAnd>(new EventFilterAnd);
+		
+		fprintf(stdout, "\tdecoding a filter to apply to these events\n");
 		xml_node<T> *s3key = filter_node.first_node("S3Key");
 		if (s3key != nullptr) {
 			// okay this means we are filtering on the S3Key clearly
-			for (auto filterRule = s3key.first_node("FilterRule"); 
+			for (auto filterRule = s3key->first_node("FilterRule"); 
 				filterRule != nullptr;
-				filterRule = s3key.next_sibling("FilterRule")) {
+				filterRule = s3key->next_sibling("FilterRule")) {
 				
-				auto name = filterRule.first_node("Name");
-				auto value = filterRule.first_node("Value");
+				auto name = filterRule->first_node("Name");
+				auto value = filterRule->first_node("Value");
 
 				if (name == nullptr || value == nullptr) {
 					fprintf(stderr, "Fatal error: malformatted filter expression");
 					throw AWSError(500, "ServiceException").setDetails("malformatted filter expression");
 				}
+
+				if (strcmp(name->value(), "prefix") != 0) {
+					throw AWSError(500, "ServiceException").setDetails("filters on prefix are the only types of filters supported");
+				}
 				
-				fprintf("\t\tfilter prefix: %s\n", value->value());
-				andFilter->addFilter(make_unique<S3EventFilterPrefix>(value->value()));
+				fprintf(stdout, "\t\tfilter by prefix: %s\n", value->value());
+				std::string filterPrefix = std::string(value->value());
+				andFilter->addFilter(std::shared_ptr<EventFilter>(
+					new S3EventFilterPrefix(filterPrefix)
+				));
 			}
 		}
 

@@ -42,205 +42,39 @@ extern "C" {
 }
 
 #include "notification_helpers.hpp"
+#include "s3filesystem.hpp"
 
-#define MAX_PATH_LENGTH 255
-#define PORT 8081
+#define MAX_PATH_LENGTH (256)
+#define PORT (8081)
+#define MAX_BUCKET_INDEX_ENTRIES (128 * 1024)
 
-#define RUN_TESTS
+// #define RUN_TESTS
 
 using namespace std;
 
-struct S3LogRef {
-	int64_t logId = -1;
-	int64_t recordIdx = -1; // index of the record in the log
-	S3LogRef() : logId(-1), recordIdx(-1) {};
-	S3LogRef(uint64_t logId, uint64_t recordIdx) : logId(logId), recordIdx(recordIdx) {};
-};
+std::unique_ptr<S3FileSystem> s3fs = std::unique_ptr<S3FileSystem>(new S3FileSystem);
 
-template<size_t record_size>
-class S3StorageLog {
-	std::mutex lock;
-	uint64_t capacity = 0;
-	uint64_t used = 0;
-	uint64_t logId = 0;
-	std::string logName;
+struct S3BucketIndexEntry {
+	char name[MAX_PATH_LENGTH];
+	S3LogRef logref;
 
-	bool initialized = false;
-
-	void initialize() {
-		if (!initialized) {
-			WooFCreate((char *)this->logName.c_str(), record_size, this->capacity);
-			initialized = true;
-		}
-	}
-public:
-	constexpr static uint64_t recordSize = record_size;
-
-	struct OutOfSpaceException : public std::exception {
-	};
-	
-	S3StorageLog(uint64_t recordCount) {
-		fprintf(stdout, "Constructed S3StorageLog with capacity %lu records of size %lu (total storage %lu)\n", recordCount, recordSize, recordCount * recordSize);
-		this->capacity = recordCount;
-
-		// generate an ID for the next log with a very low probability of collision
-		std::random_device rd;
-		std::default_random_engine generator(rd());
-		std::uniform_int_distribution<long long unsigned> distribution(0,0xFFFFFFFFFFFFFFFF);
-		this->logId = distribution(generator);
-		this->logName = getLogName(this->logId);
-
-		struct stat st = {0};
-		if (stat(this->logName.c_str(), &st) != -1) {
-			throw AWSError(500, "S3StorageLog picked an identifier that was already in use. The probability of this is INCREDIBLY low. Oops.");
-		}
+	S3BucketIndexEntry() {
+		memset(this->name, 0, sizeof(this->name));
 	}
 
-	uint64_t getLogID() {
-		return logId;
+	S3BucketIndexEntry(const char *name, S3LogRef ref) : logref(ref) {
+		strncpy(this->name, name, sizeof(this->name) / sizeof(char));
 	}
 
-	uint64_t getRecordSize() {
-		return recordSize;
+	bool isValid() {
+		return this->logref.logId != -1;
 	}
-
-	S3LogRef append(void *data) {
-		std::lock_guard<std::mutex> guard(this->lock);
-		
-		if (this->used >= this->capacity) {
-			throw OutOfSpaceException();
-		}
-
-		this->initialize();
-		this->used++;
-		long idx = WooFPut((char *)this->logName.c_str(), NULL, (char *)data);
-		if (WooFInvalid(idx)) {
-			throw AWSError(500, "failed to WooFPut record into the log");
-		}
-		// fprintf(stdout, "appended record to log %s at idx %li\n", this->logName.c_str(), idx);
-
-		return S3LogRef(this->logId, idx);
-	}
-
-	static std::string getLogName(uint64_t logid) {
-		char buffer[128];
-		snprintf(buffer, sizeof(buffer) - 1, "%lx.shard.log", logid);
-		return buffer;
-	}
-
-	static void get(const S3LogRef logref, void *result) {
-		std::string logName = getLogName(logref.logId);
-		if (WooFGet((char *)logName.c_str(), (char *)result, logref.recordIdx) != 1) {
-			throw AWSError(500, "Bad LogId when attempting to get element from log");
-		}
-	}
-};
-
-template<size_t record_size>
-class S3LogWriter {
-public:
-	uint64_t objectsPerLog;
-	std::unique_ptr<S3StorageLog<record_size>> storageLog = nullptr;
-
-	S3LogWriter() : S3LogWriter(256) {
-	}
-
-	S3LogWriter(uint64_t objectsPerLog) {
-		this->objectsPerLog = objectsPerLog;
-		this->refreshLog();
-	}
-
-	void refreshLog() {
-		this->storageLog = std::unique_ptr<S3StorageLog<record_size>>(new S3StorageLog<record_size>(objectsPerLog));
-	}
-
-	S3LogRef append(void *data) {
-		try {
-			return this->storageLog->append(data);
-		} catch (typename S3StorageLog<record_size>::OutOfSpaceException& e) {
-			fprintf(stdout, "current log (id: %lu) ran out of space, replacing with a new log\n", this->storageLog->getLogID());
-			this->refreshLog();
-		}
-		return this->storageLog->append(data);
-	}
-
-	void get(const S3LogRef logref, void *result) {
-		S3StorageLog<record_size>::get(logref, result);
-	}
-};
-
-struct S3FileSystem {
-	// each log holds 16 megabytes of data
-	constexpr static size_t S3FILE_SHARD_BYTES = 16 * 1024;
-	constexpr static size_t S3OBJECTS_PER_LOG = 1024;
-
-	struct FileExistsException : public std::exception { };
-	struct FileDoesNotExistException : public std::exception { };
-
-	struct S3Shard {
-		S3LogRef nextShard; // may be initialized as some sort of null value
-		uint64_t data_remaining = 0;
-		uint8_t data[S3FILE_SHARD_BYTES];
-	};
-
-	std::unordered_map<std::string, S3LogRef> files;
-	S3LogWriter<sizeof(S3Shard)> theShardWriter = S3LogWriter<sizeof(S3Shard)>(S3OBJECTS_PER_LOG);
-
-	S3LogRef writeBuffer(void *data, size_t data_len) {
-		// fprintf(stdout, "Writing ... data remaining ... %lu\n", data_len);
-		if (data_len > S3FILE_SHARD_BYTES) {
-			// fprintf(stdout, "\twrite large chunk and set nextShard to the appropriate ref\n");
-			auto nextShardRef = writeBuffer((void *)((uint8_t *)data + S3FILE_SHARD_BYTES), data_len - S3FILE_SHARD_BYTES);
-			// fprintf(stdout, "\t\twrote the chunk as ref %lx:%lu\n", nextShardRef.logId, nextShardRef.recordIdx);
-
-			std::unique_ptr<S3Shard> shard(new S3Shard);
-			shard->data_remaining = data_len;
-			memcpy(&(shard->data), data, S3FILE_SHARD_BYTES);
-			shard->nextShard = nextShardRef;
-			return this->theShardWriter.append((void *)shard.get());
-		} else {
-			// fprintf(stdout, "\twrite small and final chunk\n");
-			std::unique_ptr<S3Shard> shard(new S3Shard);
-			shard->data_remaining = data_len;
-			memcpy(&(shard->data), data, data_len);
-			return this->theShardWriter.append((void *)shard.get());
-		}
-	}
-
-	std::string readBuffer(S3LogRef ref) {
-		std::stringstream ss(std::stringstream::binary | std::stringstream::out);
-		
-		while (ref.logId != -1) {
-			// fprintf(stdout, "reading ... read from ref %lx:%lu\n", ref.logId, ref.recordIdx);
-			std::unique_ptr<S3Shard> shard(new S3Shard);
-			S3StorageLog<sizeof(S3Shard)>::get(ref, (void *)shard.get());
-			size_t data_in_shard = 
-				shard->data_remaining > S3FileSystem::S3FILE_SHARD_BYTES ? 
-				S3FileSystem::S3FILE_SHARD_BYTES : shard->data_remaining;
-			// fprintf(stdout, "\tdata in shard: %d\n", data_in_shard);
-			ss.write((char const*)shard->data, data_in_shard);
-			ref = shard->nextShard;
-		}
-
-		return ss.str();
-	}
-
-	S3LogRef writeFile(const std::string &key, void *data, size_t data_len) {
-		S3LogRef retval = this->writeBuffer(data, data_len);
-		fprintf(stdout, "Done writing file\n");
-		return retval;
-	}
-};
-
-struct S3Object {
-	uint64_t size;
-	char path[MAX_PATH_LENGTH];
-	char payload[1024 * 1024];
 };
 
 class S3Bucket {
 public:
 	std::string bucket_name;
+	std::string bucket_index_woof; // a woof that contains the name to storage location amppings for every file in the bucket
 	std::unique_ptr<S3NotificationConfiguration> notifConfig = nullptr;
 
 	// must be acquired for any operation on the bucket
@@ -251,9 +85,52 @@ private:
 	
 	S3Bucket(const std::string &bucket_name) {
 		this->bucket_name = bucket_name;
+		this->bucket_index_woof = Base64encode(this->bucket_name);
+
+		struct stat st = {0};
+		if (stat(this->bucket_index_woof.c_str(), &st) == -1) {
+			fprintf(stdout, "Created index woof for bucket %s (index woof name: %s)\n", this->bucket_name.c_str(), this->bucket_index_woof.c_str());
+			if (WooFCreate((char *)this->bucket_index_woof.c_str(), sizeof(S3BucketIndexEntry), MAX_BUCKET_INDEX_ENTRIES) != 1) {
+				throw AWSError(500, "failed to create the WooF for the bucket's index structure");
+			}
+		}
 	}
 
 public:
+
+	void addToIndex(const char *key, S3LogRef value) {
+		fprintf(stdout, "added key %s to index %s\n", key, this->bucket_name.c_str());
+		S3BucketIndexEntry entry(key, value);
+		if (WooFInvalid(WooFPut((char *)this->bucket_index_woof.c_str(), NULL, (void *)&entry))) {
+			throw AWSError(500, "Failed to append the entry to the index log");
+		}
+	}
+
+	void removeFromIndex(const char *key) {
+		// actually just appends a null S3LogRef associated with the key, this explicitly
+		// nulls the association
+		S3LogRef nullRef;
+		this->addToIndex(key, nullRef);
+	}
+
+	S3BucketIndexEntry getEntryForKey(const char *key) {
+		S3BucketIndexEntry entry;
+		unsigned long seqno;
+		seqno = WooFGetLatestSeqno((char *)this->bucket_index_woof.c_str());
+
+		fprintf(stdout, "Scanning for entry associated with the key: %s starting at seqno: %lu\n", key, seqno);
+		while (!WooFInvalid(seqno) && WooFGet((char *)this->bucket_index_woof.c_str(), (void *)&entry, seqno) == 1) {
+			if (strncmp(entry.name, key, MAX_BUCKET_INDEX_ENTRIES) == 0) {
+				// then we found the match
+				return entry;
+			}
+			seqno--;
+		}
+	
+		S3BucketIndexEntry nullEntry;
+		return nullEntry;
+	}
+
 	static S3Bucket &getOrCreateS3Bucket(const std::string& bucket_name) {
 		if (buckets.find(bucket_name) != buckets.end()) {
 			return *(buckets[bucket_name]);
@@ -366,11 +243,6 @@ public:
 		return this->path;
 	}
 
-	// get path returns a full path to the object that should be created 
-	inline const std::string getStoragePath() {
-		return Base64encode(this->s3bucket->bucket_name + "/" + this->key);
-	}
-
 	S3Bucket &getS3Bucket() {
 		return *(this->s3bucket);
 	}
@@ -390,48 +262,45 @@ int callback_s3_put(const struct _u_request * httprequest, struct _u_response * 
 		throw AWSError(500, "Object path not specified, only found bucket name");
 	}
 	
-	std::string b64key = key.getStoragePath(); // base64bucket/base64key is the structure
-
-	fprintf(stdout, "putting as key %s (originally %s) in bucket %s\n", 
-		b64key.c_str(), key.getKey().c_str(), key.getBucket().c_str());
+	fprintf(stdout, "putting as key %s in bucket %s\n", 
+		key.getKey().c_str(), key.getBucket().c_str());
 
 	// store the payload in a new WooF at that location
 	size_t payload_size = httprequest->binary_body_length;
 	const char *payload = (const char *)httprequest->binary_body;
 	
-	if (payload_size > sizeof(S3Object().payload)) {
-		char buff[1024];
-		snprintf(buff, sizeof(buff), "Payload too large for the S3 object, max size: %lu", sizeof(S3Object().payload));
-		throw AWSError(500, buff);
-	}
-	
-	unique_ptr<S3Object> obj = make_unique<S3Object>();
-	memset((void *)(obj.get()), 0, sizeof(S3Object));
-	obj->size = payload_size;
-	memcpy((void *)obj->payload, (void *)payload, payload_size);
-
-	if (obj->size < 4096) {
-		fprintf(stdout, "payload: (%lu)\n%s\n", (unsigned long)obj->size, obj->payload);
+	// write the payload into the s3fs and get a logref to the location where it was recorded
+	if (payload_size < 4096) {
+		fprintf(stdout, "payload: (%lu)\n%s\n", (unsigned long)payload_size, payload);
 	} else {
-		fprintf(stdout, "payload: (%lu) <too large to print>\n", (unsigned long)obj->size);
+		fprintf(stdout, "payload: (%lu) <too large to print>\n", (unsigned long)payload_size);
 	}
 
-	{
-		struct stat st = {0};
-		if (stat(b64key.c_str(), &st) == -1) {
-			if (WooFCreate((char *)b64key.c_str(), sizeof(S3Object), 1) != 1) {
-				throw AWSError(500, "failed to create the WooF for the object");
-			}
-		}
+	fprintf(stdout, "writing payload to s3fs\n");
+	S3LogRef ref = s3fs->writeBuffer((void *)payload, payload_size);
+	
+	// fprintf(stdout, "writing s3logref record out to index log\n");
+	// THE OLD INDEX MECHANISM WORKED WITH A LOG PER KEY, THE NEW MECHANISM DOES 
+	// A SEQUENTIAL SEARCH THROUGH A WOOF GOING BACKWARDS UNTIL THE "BEGINNING OF TIME"
+	// {
+	// 	struct stat st = {0};
+	// 	if (stat(b64key.c_str(), &st) == -1) {
+	// 		if (WooFCreate((char *)b64key.c_str(), sizeof(S3LogRef), 1) != 1) {
+	// 			throw AWSError(500, "failed to create the WooF for the object");
+	// 		}
+	// 	}
 
-		if (WooFInvalid(WooFPut((char *)b64key.c_str(), NULL, (void *)(obj.get())))) {
-			throw AWSError(500, "Failed to write the object into WooF");
-		}
-	}
+	// 	if (WooFInvalid(WooFPut((char *)b64key.c_str(), NULL, (void *)(&ref)))) {
+	// 		throw AWSError(500, "Failed to write the object into WooF");
+	// 	}
+	// }
+	bucket.addToIndex(key.getKey().c_str(), ref);
 
 	ulfius_set_string_body_response(httpresponse, 200, "");
 
 	if (bucket.notifConfig != nullptr) {
+		fprintf(stdout, "Found bucket.notifConfig associated with the bucket, sending notification if anyone cares\n");
+
 		// https://docs.aws.amazon.com/AmazonS3/latest/dev/notification-content-structure.html
 		json_t *event_full = json_object();
 
@@ -481,6 +350,9 @@ int callback_s3_put(const struct _u_request * httprequest, struct _u_response * 
 		// dispatch the notification
 		bucket.notifConfig->notify("s3:ObjectCreated:Put", event_full);
 		json_decref(event_full);
+		
+	} else {
+		fprintf(stdout, "bucket has no notifConfig, ending now silently. no one is interested\n");
 	}
 
 	return U_CALLBACK_CONTINUE;
@@ -491,34 +363,28 @@ int callback_s3_get(const struct _u_request * httprequest, struct _u_response * 
 
 	// figure out the raw path the request specified 
 	S3Key key(httprequest->http_url);
-	std::string b64key = key.getStoragePath(); 
+	S3Bucket &bucket = key.getS3Bucket();
+
+	fprintf(stdout, "client requested key %s in bucket %s, scanning the index log for an entry\n", key.getKey().c_str(), key.getBucket().c_str());
 	
-	fprintf(stdout, "getting with key %s (originally %s)\n", b64key.c_str(), key.getRawPath().c_str());
+	// acquire the read/write lock on the bucket for this key
 	std::lock_guard<std::mutex> g(key.getS3Bucket().bucketLock);
-
-	// read the file from the disk
-	// struct stat st = {0};
-	// if (stat(b64key.c_str(), &st) == -1) {
-	// 	fprintf(stderr, "Fatal error: no such key %s (originally %s)\n", b64key.c_str(), key.getRawPath().c_str());
-	// 	throw AWSError(404, "no such key");
-	// }
-
-	unsigned long seqno = WooFGetLatestSeqno((char *)b64key.c_str());
-
-	if (WooFInvalid(seqno)) {
-		throw AWSError(404, "Not Found");
-	}
-
-	fprintf(stdout, "Got latest seqno %lu\n", seqno);
-
-	std::unique_ptr<S3Object> obj(new S3Object);
-	if (WooFGet((char *)b64key.c_str(), (void *)obj.get(), seqno) != 1) {
-		throw AWSError(500, "ServiceException");
-	}
 	
-	fprintf(stdout, "The result from the WooF was: %s\n", std::string(obj->payload, obj->size).c_str());
+	S3BucketIndexEntry entry = bucket.getEntryForKey(key.getKey().c_str());
+	if (!entry.isValid()) {
+		throw AWSError(404, "Not found");
+	}
 
-	ulfius_set_binary_body_response(httpresponse, 200, obj->payload, obj->size);
+	fprintf(stdout, "found record: %lx:%lu\n", entry.logref.logId, entry.logref.recordIdx);
+	std::string result = s3fs->readBuffer(entry.logref);
+
+	if (result.length() < 4096) {
+		fprintf(stdout, "The result from the WooF was: %s\n", result.c_str());
+	} else {
+		fprintf(stdout, "The result from the WooF was (%lu bytes): <too large to show>", (unsigned long)result.length());
+	}
+
+	ulfius_set_binary_body_response(httpresponse, 200, result.c_str(), result.length());
 
 	return U_CALLBACK_CONTINUE;
 }
@@ -544,8 +410,26 @@ int callback_s3_request(const struct _u_request * httprequest, struct _u_respons
 	return U_CALLBACK_CONTINUE;
 }
 
-int callback_s3_put_notification(const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
+int callback_s3_get_objects(const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
+	fprintf(stdout, "\n\nREQUEST GET LIST OBJECTS: %s\n", httprequest->http_url);
+	
+	const char *prefix_match = u_map_get(httprequest->map_url, "prefix");
+	if (prefix_match != nullptr) {
+		// try doing a prefix match on the contents of the bucket
+		fprintf(stdout, "\tTRYING PREFIX MATCH WITH PREFIX: %s\n", prefix_match);
 
+		// RIGHT NOW WE JUST BLANKET FAIL A PREFIX MATCH
+
+		ulfius_set_string_body_response(httpresponse, 500, "ServiceException");
+		return U_CALLBACK_CONTINUE;
+	}
+
+	ulfius_set_string_body_response(httpresponse, 500, "ServiceException");
+	return U_CALLBACK_CONTINUE;
+}
+
+int callback_s3_put_notification(const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
+	
 	fprintf(stdout, "\n\nREQUEST PUT BUCKET/NOTIFICATION: %s\n", httprequest->http_url);
 	if (strstr(httprequest->http_url, "?notification") != NULL) {
 		fprintf(stdout, "determined that it is infact a put notification request\n");
@@ -664,6 +548,7 @@ int main(int argc, char **argv) {
 	// NOTE: we do not require that buckets be explicitly created, you can just start using them 
 	// we will however implement a stubbed API or something eventually to allow compatibility
 	// b/c of some limitation we can't set the default endpoint without also adding a regular endpoint
+	ulfius_add_endpoint_by_val(&instance, "GET", "/", "/:bucket", 0, &callback_s3_get_objects, NULL);
 	ulfius_add_endpoint_by_val(&instance, "PUT", "/", "/:bucket", 0, &callback_s3_put_notification, NULL);
 	ulfius_set_default_endpoint(&instance, callback_s3_request, NULL);
 
@@ -711,9 +596,9 @@ void run_s3_tests() {
 			ss << i << ", ";
 		}
 
-		S3LogRef ref = fs.writeFile("helloworld.txt", (void *)ss.str().c_str(), ss.str().length());
+		S3LogRef ref = fs.writeBuffer((void *)ss.str().c_str(), ss.str().length());
 		std::string output = fs.readBuffer(ref);
-		fprintf(stdout, "length out %d == length written %d\n", output.length(), ss.str().length());
+		fprintf(stdout, "length out %d == length written %d\n", (int)output.length(), (int)ss.str().length());
 		assert(output.length() == ss.str().length());
 	}
 
