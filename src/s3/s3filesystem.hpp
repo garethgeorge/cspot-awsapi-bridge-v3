@@ -1,6 +1,7 @@
 #ifndef S3FILESYSTEM_HPP
 #define S3FILESYSTEM_HPP
 
+#include <random>
 
 struct S3LogRef {
 	int64_t logId = -1;

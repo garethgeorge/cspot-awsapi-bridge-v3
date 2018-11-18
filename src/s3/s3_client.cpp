@@ -13,11 +13,12 @@
 #include <csignal>
 #include <ctime>
 #include <fstream>
-#include <random>
+#include <sstream>
 
 #include <src/constants.h>
 #include <3rdparty/base64.h>
 #include <3rdparty/rapidxml/rapidxml.hpp>
+#include <3rdparty/rapidxml/rapidxml_print.hpp>
 #include <lib/utility.h>
 #include <lib/wp.h>
 #include <lib/aws.hpp>
@@ -55,8 +56,9 @@ using namespace std;
 std::unique_ptr<S3FileSystem> s3fs = std::unique_ptr<S3FileSystem>(new S3FileSystem);
 
 struct S3BucketIndexEntry {
-	char name[MAX_PATH_LENGTH];
+	char name[MAX_PATH_LENGTH + 1]; // don't forget about the extra byte for null terminator
 	S3LogRef logref;
+	uint64_t size = 0;
 
 	S3BucketIndexEntry() {
 		memset(this->name, 0, sizeof(this->name));
@@ -64,6 +66,8 @@ struct S3BucketIndexEntry {
 
 	S3BucketIndexEntry(const char *name, S3LogRef ref) : logref(ref) {
 		strncpy(this->name, name, sizeof(this->name) / sizeof(char));
+		// go ahead and ensure we always have a null termination, just makes life easier
+		this->name[MAX_PATH_LENGTH] = 0;
 	}
 
 	bool isValid() {
@@ -98,9 +102,8 @@ private:
 
 public:
 
-	void addToIndex(const char *key, S3LogRef value) {
-		fprintf(stdout, "added key %s to index %s\n", key, this->bucket_name.c_str());
-		S3BucketIndexEntry entry(key, value);
+	void addToIndex(S3BucketIndexEntry entry) {
+		fprintf(stdout, "added key %s to index %s\n", entry.name, this->bucket_name.c_str());
 		if (WooFInvalid(WooFPut((char *)this->bucket_index_woof.c_str(), NULL, (void *)&entry))) {
 			throw AWSError(500, "Failed to append the entry to the index log");
 		}
@@ -110,7 +113,8 @@ public:
 		// actually just appends a null S3LogRef associated with the key, this explicitly
 		// nulls the association
 		S3LogRef nullRef;
-		this->addToIndex(key, nullRef);
+		S3BucketIndexEntry entry(key, nullRef);
+		this->addToIndex(entry);
 	}
 
 	S3BucketIndexEntry getEntryForKey(const char *key) {
@@ -129,6 +133,23 @@ public:
 	
 		S3BucketIndexEntry nullEntry;
 		return nullEntry;
+	}
+
+	signed long getNextIndexEntry(long seqno, S3BucketIndexEntry &entry) {
+		if (seqno == -1) {
+			// you pass in seqno -1 to indicate the start of the traversal
+			seqno = WooFGetLatestSeqno((char *)this->bucket_index_woof.c_str());
+		} else {
+			seqno--;
+		}
+
+		if (!WooFInvalid(seqno) && WooFGet((char *)this->bucket_index_woof.c_str(), (void *)&entry, seqno) == 1) {
+			return seqno;
+		}
+
+		// you get back -1 to indicate when you have reached the end, its a weird interface
+		// I know.
+		return -1;
 	}
 
 	static S3Bucket &getOrCreateS3Bucket(const std::string& bucket_name) {
@@ -209,11 +230,9 @@ private:
 	std::string path;
 
 public:
-	S3Key(const std::string& path) {
-		if (path[0] == '/')
-			this->path = path.c_str() + 1;
-		else 
-			this->path = path.c_str();
+	S3Key(const char *path_ptr) {
+		if (path_ptr[0] == '/')
+			path_ptr++;
 		
 		std::size_t slashPos = this->path.find('/', 0);
 		
@@ -294,7 +313,10 @@ int callback_s3_put(const struct _u_request * httprequest, struct _u_response * 
 	// 		throw AWSError(500, "Failed to write the object into WooF");
 	// 	}
 	// }
-	bucket.addToIndex(key.getKey().c_str(), ref);
+
+	S3BucketIndexEntry entry(key.getKey().c_str(), ref);
+	entry.size = payload_size; // TODO: include additional metadata like last modified time
+	bucket.addToIndex(entry);
 
 	ulfius_set_string_body_response(httpresponse, 200, "");
 
@@ -412,19 +434,51 @@ int callback_s3_request(const struct _u_request * httprequest, struct _u_respons
 
 int callback_s3_get_objects(const struct _u_request * httprequest, struct _u_response * httpresponse, void * user_data) {
 	fprintf(stdout, "\n\nREQUEST GET LIST OBJECTS: %s\n", httprequest->http_url);
+
+	const char *end_of_bucket_name = strstr(httprequest->http_url, "?");
+	if (end_of_bucket_name == nullptr) 
+		end_of_bucket_name = httprequest->http_url + strlen(httprequest->http_url);
+	std::string bucket_name(httprequest->http_url, end_of_bucket_name - httprequest->http_url);
+
+	S3Key key(httprequest->http_url);
+
+	S3Bucket &bucket = key.getS3Bucket();
+	fprintf(stdout, "\tlisting objects in bucket: %s", bucket_name.c_str());
 	
 	const char *prefix_match = u_map_get(httprequest->map_url, "prefix");
 	if (prefix_match != nullptr) {
 		// try doing a prefix match on the contents of the bucket
 		fprintf(stdout, "\tTRYING PREFIX MATCH WITH PREFIX: %s\n", prefix_match);
-
-		// RIGHT NOW WE JUST BLANKET FAIL A PREFIX MATCH
-
-		ulfius_set_string_body_response(httpresponse, 500, "ServiceException");
-		return U_CALLBACK_CONTINUE;
+	} else {
+		fprintf(stdout, "\tSETTING MATCH PREFIX TO DEFAULT: ''\n");
+		prefix_match = "";
 	}
 
-	ulfius_set_string_body_response(httpresponse, 500, "ServiceException");
+	const char *delimiter = u_map_get(httprequest->map_url, "delimiter");
+	if (delimiter) {
+		fprintf(stdout, "\tSCANNING COMMON_PREFIXES WITH DELIMITER: %s\n", delimiter);
+	} else {
+		fprintf(stdout, "\tNO DELIMITER WAS SET, SETTING DELIMITER TO NULL STRING\n");
+		delimiter = "\0";
+	}
+	
+	// now we do a sequential scan of the elements in the index structure and build
+	// the response structure
+	xml_document<> doc;
+	xml_node<> *node_ListBucketResult = doc.allocate_node(node_element, "ListBucketResult");
+	doc.append_node(node_ListBucketResult);
+	
+	S3BucketIndexEntry entry;
+	signed long seqno = -1;
+	while ((seqno = bucket.getNextIndexEntry(seqno, entry)) != -1) {
+		// if (strstr(entry.name, delimiter) {
+
+		// }
+	}
+
+	std::string ss;
+	rapidxml::print(std::back_inserter(ss), doc, 0);
+	ulfius_set_string_body_response(httpresponse, 200, ss.c_str());
 	return U_CALLBACK_CONTINUE;
 }
 
